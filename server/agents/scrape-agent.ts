@@ -264,8 +264,45 @@ async function main() {
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  // Step 4: Save
+  // Step 3b: Fetch jobs from priority companies via their ATS APIs
+  const { fetchAllPriorityJobs } = await import("../scraper/priority-fetcher.js");
+  const priorityJobs = await fetchAllPriorityJobs();
+  if (priorityJobs.length > 0) {
+    const toMerge = priorityJobs.map((j) => ({
+      url: j.url,
+      title: j.title,
+      company: j.company,
+      ats: j.ats,
+      location: j.location,
+      salary: j.salary,
+      seniority: null,
+      source: j.source,
+      scrape_detail_failed: false,
+    }));
+    const before = jobsData.jobs.length;
+    mergeNewJobs(jobsData, toMerge);
+    const added = jobsData.jobs.length - before;
+    console.log(`  Added ${added} new priority jobs`);
+  }
+
+  // Step 3c: Backfill priority flag on all existing jobs (in case company list changed)
+  const { isPriorityCompany } = await import("../config/priority-companies.js");
+  for (const job of jobsData.jobs) {
+    if (!job.priority && isPriorityCompany(job.company)) {
+      job.priority = true;
+    }
+  }
+
+  // Step 4: Score new jobs
   const today = new Date().toISOString().split("T")[0];
+  const unscoredJobs = jobsData.jobs.filter((j) => j.date_found === today && j.score === null);
+  if (unscoredJobs.length > 0) {
+    console.log(`\n  Scoring ${unscoredJobs.length} new jobs...`);
+    const { scoreJobs } = await import("../scraper/job-scorer.js");
+    await scoreJobs(unscoredJobs);
+  }
+
+  // Step 5: Save
   const newCount = jobsData.jobs.filter((j) => j.date_found === today && j.status === "new").length;
 
   jobsData.last_scraped = new Date().toISOString();

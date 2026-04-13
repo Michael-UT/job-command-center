@@ -4,8 +4,14 @@
 import express from "express";
 import cors from "cors";
 import { spawn } from "child_process";
-import { loadJobs, getJobsByStatus, type JobsData } from "./scraper/dedup.js";
+import { readFileSync, existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { loadJobs, saveJobs, getJobsByStatus, updateStatus, type JobsData, type Job } from "./scraper/dedup.js";
 import { getQueryStats } from "./config/scrape-config.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = 3001;
@@ -41,6 +47,10 @@ app.get("/api/status", (_req, res) => {
       new_today: grouped.newToday.length,
       previously_seen: grouped.previouslySeen.length,
       applied: grouped.applied.length,
+      responded: grouped.responded.length,
+      interviewing: grouped.interviewing.length,
+      offer: grouped.offer.length,
+      rejected: grouped.rejected.length,
       skipped: grouped.skipped.length,
       last_scraped: data.last_scraped,
       scrape_stats: data.scrape_stats,
@@ -101,7 +111,7 @@ app.post("/api/apply/:id", (req, res) => {
   console.log(`[API] Interact with the agent in the terminal running the server.`);
 
   // Spawn apply agent — user interacts in terminal
-  const child = spawn("npx", ["tsx", "server/agents/apply-agent.ts", jobId], {
+  const child = spawn("npx", ["tsx", "server/apply/apply-runner.ts", jobId], {
     cwd: process.cwd(),
     stdio: "inherit",
     env: { ...process.env },
@@ -132,7 +142,7 @@ app.post("/api/apply-all-new", (req, res) => {
 
   const child = spawn(
     "npx",
-    ["tsx", "server/agents/apply-agent.ts", "--batch", "--limit", String(limit)],
+    ["tsx", "server/apply/apply-runner.ts", "--batch", "--limit", String(limit)],
     {
       cwd: process.cwd(),
       stdio: "inherit",
@@ -149,6 +159,42 @@ app.post("/api/apply-all-new", (req, res) => {
     total_new: newJobs.length,
     applying: Math.min(limit, newJobs.length),
   });
+});
+
+// POST /api/jobs/:id/status — update a job's status
+const VALID_STATUSES: Job["status"][] = ["new", "applied", "responded", "interviewing", "offer", "rejected", "skipped"];
+
+app.post("/api/jobs/:id/status", (req, res) => {
+  const jobId = req.params.id;
+  const newStatus = req.body?.status as Job["status"];
+
+  if (!VALID_STATUSES.includes(newStatus)) {
+    res.status(400).json({ error: `Invalid status: ${newStatus}. Valid: ${VALID_STATUSES.join(", ")}` });
+    return;
+  }
+
+  const data = loadJobs();
+  const success = updateStatus(data, jobId, newStatus);
+  if (!success) {
+    res.status(404).json({ error: `Job ${jobId} not found` });
+    return;
+  }
+
+  saveJobs(data);
+  const job = data.jobs.find((j) => j.id === jobId);
+  res.json({ success: true, job });
+});
+
+// GET /api/stories — return the interview story bank
+app.get("/api/stories", (_req, res) => {
+  const storyPath = join(__dirname, "data/story-bank.md");
+  if (!existsSync(storyPath)) {
+    res.json({ content: "", count: 0 });
+    return;
+  }
+  const content = readFileSync(storyPath, "utf-8");
+  const count = (content.match(/^## /gm) || []).length;
+  res.json({ content, count });
 });
 
 app.listen(PORT, () => {

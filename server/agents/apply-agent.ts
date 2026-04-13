@@ -50,12 +50,17 @@ Job ID for marking as applied after submission: ${job.id}
 Job title: ${job.title || "Unknown"}
 Company: ${job.company || "Unknown"}
 
+IMPORTANT: You MUST use the Playwright MCP tools (mcp__playwright__*) for ALL browser interactions.
+Use browser_navigate to open pages, browser_snapshot to see the page, browser_click to click elements,
+browser_fill_form to fill inputs, browser_select_option for dropdowns, and browser_file_upload for resume.
+Do NOT use Bash or any other method to interact with the browser.
+
 Steps:
 1. First call load_profile to get the applicant's profile data
 2. Call get_resume_text to read the resume content for answering custom questions
-3. Navigate to the job URL in the browser
-4. If there's an "Apply" button, click it to reach the application form
-5. Fill out the form following the behavioral rules in your system prompt
+3. Use browser_navigate to open the job URL
+4. Use browser_snapshot to see the page, then click "Apply" if present
+5. Use browser_snapshot to see form fields, then use browser_fill_form and browser_click to fill each field following the behavioral rules in your system prompt
 6. For any field you're not >90% confident about, ask the user via AskUserQuestion
 7. Before submitting, show a complete summary and ask for confirmation
 8. After confirmed submission, call mark_applied with job ID "${job.id}"
@@ -68,7 +73,7 @@ Steps:
         systemPrompt,
         // Playwright MCP for browser automation
         mcpServers: {
-          playwright: { command: "npx", args: ["@playwright/mcp@latest", "--headless=false"] },
+          playwright: { type: "stdio" as const, command: "npx", args: ["@playwright/mcp", "--headless=false"] },
           profile: profileServer,
           apply_tools: applyToolsServer,
         },

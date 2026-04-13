@@ -11,17 +11,21 @@
     "build": "vite build",
     "preview": "vite preview",
     "scrape": "tsx server/agents/scrape-agent.ts",
-    "apply": "tsx server/agents/apply-agent.ts",
-    "apply:batch": "tsx server/agents/apply-agent.ts --batch"
+    "apply": "tsx server/apply/apply-runner.ts",
+    "apply:batch": "tsx server/apply/apply-runner.ts --batch",
+    "apply:old": "tsx server/agents/apply-agent.ts",
+    "stories": "tsx server/agents/story-agent.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "latest",
     "@anthropic-ai/sdk": "latest",
+    "@playwright/mcp": "^0.0.70",
     "@types/pdf-parse": "^1.1.5",
     "cors": "^2.8.5",
     "dotenv": "^17.3.1",
     "express": "^4.21.0",
     "pdf-parse": "^1.1.1",
+    "playwright": "^1.60.0-alpha-1774999321000",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "yaml": "^2.7.0",
