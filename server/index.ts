@@ -4,7 +4,16 @@
 import express from "express";
 import cors from "cors";
 import { spawn } from "child_process";
-import { loadJobs, getJobsByStatus, markApplied, saveJobs } from "./scraper/dedup.js";
+import {
+  archiveJob,
+  getJobsByStatus,
+  loadArchivedJobs,
+  loadJobs,
+  markApplied,
+  restoreArchivedJob,
+  saveArchivedJobs,
+  saveJobs,
+} from "./scraper/dedup.js";
 import { getQueryStats } from "./config/scrape-config.js";
 import {
   getDefaultSearchProfile,
@@ -59,22 +68,42 @@ function sortJobsByMatch<
   });
 }
 
+function sortArchivedJobs<
+  T extends {
+    archived_at?: string | null;
+    match_score?: number | null;
+    date_found: string;
+  },
+>(jobs: T[]): T[] {
+  return [...jobs].sort((left, right) => {
+    const archiveDelta = (right.archived_at || "").localeCompare(left.archived_at || "");
+    if (archiveDelta !== 0) return archiveDelta;
+    const scoreDelta = (right.match_score ?? -1) - (left.match_score ?? -1);
+    if (scoreDelta !== 0) return scoreDelta;
+    return right.date_found.localeCompare(left.date_found);
+  });
+}
+
 // GET /api/jobs — return all jobs grouped by status
 app.get("/api/jobs", (_req, res) => {
   try {
     const data = loadJobs();
+    const archivedData = loadArchivedJobs();
     const searchProfile = loadSearchProfile();
     const enrichedData = {
       ...data,
       jobs: data.jobs.map((job) => enrichJobMatches(job, searchProfile)),
     };
+    const enrichedArchivedJobs = archivedData.jobs.map((job) => enrichJobMatches(job, searchProfile));
     const grouped = getJobsByStatus(enrichedData);
     res.json({
       newToday: sortJobsByMatch(grouped.newToday),
       previouslySeen: sortJobsByMatch(grouped.previouslySeen),
       applied: sortJobsByMatch(grouped.applied),
       skipped: sortJobsByMatch(grouped.skipped),
+      archived: sortArchivedJobs(enrichedArchivedJobs),
       total: data.jobs.length,
+      archived_total: archivedData.jobs.length,
       last_scraped: data.last_scraped,
       scrape_stats: data.scrape_stats,
       scrape_errors: data.scrape_errors,
@@ -89,6 +118,7 @@ app.get("/api/jobs", (_req, res) => {
 app.get("/api/status", (_req, res) => {
   try {
     const data = loadJobs();
+    const archivedData = loadArchivedJobs();
     const searchProfile = loadSearchProfile();
     const grouped = getJobsByStatus({
       ...data,
@@ -101,6 +131,7 @@ app.get("/api/status", (_req, res) => {
       previously_seen: grouped.previouslySeen.length,
       applied: grouped.applied.length,
       skipped: grouped.skipped.length,
+      archived: archivedData.jobs.length,
       last_scraped: data.last_scraped,
       scrape_stats: data.scrape_stats,
       scrape_errors: data.scrape_errors,
@@ -223,6 +254,57 @@ app.post("/api/mark-applied/:id", (req, res) => {
 
     saveJobs(data);
     res.json({ message: `Marked ${jobId} as applied.`, job_id: jobId });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post("/api/archive/:id", (req, res) => {
+  try {
+    const jobId = req.params.id;
+    const data = loadJobs();
+    const archivedData = loadArchivedJobs();
+    const archivedJob = archiveJob(data, archivedData, jobId);
+
+    if (!archivedJob) {
+      res.status(404).json({ error: `Job ${jobId} not found` });
+      return;
+    }
+
+    saveJobs(data);
+    saveArchivedJobs(archivedData);
+    res.json({
+      message: `Archived ${archivedJob.company || "job"} - ${archivedJob.title || archivedJob.id}.`,
+      job_id: jobId,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post("/api/restore/:id", (req, res) => {
+  try {
+    const jobId = req.params.id;
+    const data = loadJobs();
+    const archivedData = loadArchivedJobs();
+    const result = restoreArchivedJob(data, archivedData, jobId);
+
+    if (!result.success) {
+      if (result.reason === "duplicate") {
+        res.status(409).json({ error: `Job ${jobId} already exists in the active board.` });
+        return;
+      }
+
+      res.status(404).json({ error: `Archived job ${jobId} not found` });
+      return;
+    }
+
+    saveJobs(data);
+    saveArchivedJobs(archivedData);
+    res.json({
+      message: `Restored ${result.job.company || "job"} - ${result.job.title || result.job.id}.`,
+      job_id: jobId,
+    });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }

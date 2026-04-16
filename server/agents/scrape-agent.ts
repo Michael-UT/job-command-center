@@ -12,7 +12,7 @@ import { generateQueryMatrix, detectATS } from "../config/scrape-config.js";
 import { loadSearchProfile } from "../config/search-profile.js";
 import { extractJobMatchContext } from "../matching/context.js";
 import { parseSinglePage } from "../scraper/batch-parser.js";
-import { loadJobs, saveJobs, mergeNewJobs, isDuplicate } from "../scraper/dedup.js";
+import { loadArchivedJobs, loadJobs, saveJobs, mergeNewJobs, isDuplicate } from "../scraper/dedup.js";
 
 const QUICK_MODE = process.argv.includes("--quick");
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
@@ -172,7 +172,10 @@ async function main() {
   console.log(`Search API: Serper.dev (free tier)\n`);
 
   const jobsData = loadJobs();
+  const archivedJobsData = loadArchivedJobs();
   console.log(`Existing jobs in database: ${jobsData.jobs.length}`);
+  console.log(`Archived jobs excluded from re-import: ${archivedJobsData.jobs.length}`);
+  const knownJobs = [...jobsData.jobs, ...archivedJobsData.jobs];
 
   // Step 1: Run all searches via Serper.dev
   const allSearchResults: SearchResult[] = [];
@@ -207,7 +210,7 @@ async function main() {
   // Step 2: Dedup
   const uniqueUrls = new Map<string, SearchResult>();
   for (const result of allSearchResults) {
-    if (!isDuplicate(jobsData.jobs, result.url) && !uniqueUrls.has(result.url)) {
+    if (!isDuplicate(knownJobs, result.url) && !uniqueUrls.has(result.url)) {
       uniqueUrls.set(result.url, result);
     }
   }
@@ -249,7 +252,7 @@ async function main() {
         seniority: null,
         source: "serper",
         scrape_detail_failed: true,
-      }]);
+      }], archivedJobsData.jobs);
       errors.push({
         source: detectATS(url),
         query: url,
@@ -281,7 +284,7 @@ async function main() {
             scrape_detail_failed: false,
             description_text: matchContext.descriptionText,
             qualification_text: matchContext.qualificationText,
-          }]);
+          }], archivedJobsData.jobs);
           addedThisRun += added;
           parseSuccess++;
           if (added > 0) {
@@ -304,7 +307,7 @@ async function main() {
           seniority: null,
           source: "serper",
           scrape_detail_failed: true,
-        }]);
+        }], archivedJobsData.jobs);
         errors.push({
           source: detectATS(url),
           query: url,
@@ -328,7 +331,7 @@ async function main() {
         seniority: null,
         source: "serper",
         scrape_detail_failed: true,
-      }]);
+      }], archivedJobsData.jobs);
       errors.push({
         source: detectATS(url),
         query: url,

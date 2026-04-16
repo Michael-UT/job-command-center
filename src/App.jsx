@@ -185,7 +185,9 @@ export default function JobCommandCenter() {
     previouslySeen: [],
     applied: [],
     skipped: [],
+    archived: [],
     total: 0,
+    archived_total: 0,
     last_scraped: null,
     scrape_stats: null,
     scrape_errors: [],
@@ -203,6 +205,9 @@ export default function JobCommandCenter() {
   const [scraping, setScraping] = useState(false);
   const [applying, setApplying] = useState(null);
   const [markingApplied, setMarkingApplied] = useState(null);
+  const [archiving, setArchiving] = useState(null);
+  const [restoring, setRestoring] = useState(null);
+  const [showArchived, setShowArchived] = useState(false);
   const [batchLimit, setBatchLimit] = useState("10");
   const [statusMsg, setStatusMsg] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
@@ -319,6 +324,40 @@ export default function JobCommandCenter() {
     }
   };
 
+  const handleArchive = async (jobId) => {
+    setArchiving(jobId);
+    try {
+      const res = await fetch(`${API_BASE}/archive/${jobId}`, { method: "POST" });
+      const result = await res.json();
+      if (!res.ok) setStatusMsg(result.error || "Failed to archive job.");
+      else {
+        setStatusMsg(result.message || "Job archived.");
+        fetchJobs();
+      }
+    } catch {
+      setStatusMsg("Failed to archive job.");
+    } finally {
+      setArchiving(null);
+    }
+  };
+
+  const handleRestore = async (jobId) => {
+    setRestoring(jobId);
+    try {
+      const res = await fetch(`${API_BASE}/restore/${jobId}`, { method: "POST" });
+      const result = await res.json();
+      if (!res.ok) setStatusMsg(result.error || "Failed to restore archived job.");
+      else {
+        setStatusMsg(result.message || "Job restored.");
+        fetchJobs();
+      }
+    } catch {
+      setStatusMsg("Failed to restore archived job.");
+    } finally {
+      setRestoring(null);
+    }
+  };
+
   const handleSaveProfile = async () => {
     setProfileSaving(true);
     try {
@@ -371,9 +410,14 @@ export default function JobCommandCenter() {
   };
 
   const allATS = useMemo(() => {
-    const all = [...data.newToday, ...data.previouslySeen, ...data.applied];
+    const all = [...data.newToday, ...data.previouslySeen, ...data.applied, ...(data.archived || [])];
     return [...new Set(all.map((job) => job.ats))].sort();
   }, [data]);
+
+  const filteredArchivedJobs = useMemo(
+    () => filterJobs(data.archived || []),
+    [data.archived, filterATS, minMatch, search],
+  );
 
   const formatDate = (iso) => {
     if (!iso) return "Never";
@@ -405,11 +449,12 @@ export default function JobCommandCenter() {
     return `${titleSummary} | excludes ${exclusionPreview}${searchProfile.negativeTitleKeywords.length > 2 ? ` +${searchProfile.negativeTitleKeywords.length - 2} more` : ""}`;
   }, [searchProfile]);
 
-  const JobRow = ({ job, greyed = false }) => {
+  const JobRow = ({ job, mode = "active" }) => {
     const matchColor = getMatchColor(job.match_score ?? 0);
+    const greyed = mode !== "active";
 
     return (
-      <tr style={{ opacity: greyed ? 0.4 : 1, borderBottom: "1px solid #1a1a22" }}>
+      <tr style={{ opacity: greyed ? 0.5 : 1, borderBottom: "1px solid #1a1a22" }}>
         <td style={{ padding: "10px 12px", fontSize: 12, maxWidth: 280 }}>
           <a
             href={job.url}
@@ -462,43 +507,85 @@ export default function JobCommandCenter() {
         </td>
         <td style={{ padding: "10px 8px", fontSize: 10, color: "#555" }}>{job.date_found}</td>
         <td style={{ padding: "10px 8px" }}>
-          {greyed ? (
-            <span style={{ fontSize: 10, color: "#555" }}>
-              Applied {job.date_applied ? formatDate(job.date_applied) : ""}
-            </span>
-          ) : (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {mode === "archived" ? (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 10, color: "#666" }}>
+                Archived {job.archived_at ? formatDate(job.archived_at) : ""}
+              </span>
               <button
-                onClick={() => handleApply(job.id)}
-                disabled={applying === job.id}
+                onClick={() => handleRestore(job.id)}
+                disabled={restoring === job.id}
                 style={{
-                  background: applying === job.id ? "#333" : "#8b5cf6",
-                  color: "#fff",
-                  border: "none",
-                  padding: "4px 12px",
-                  borderRadius: 4,
-                  fontSize: 10,
-                  cursor: "pointer",
-                  fontWeight: 600,
-                }}
-              >
-                {applying === job.id ? "..." : "Apply"}
-              </button>
-              <button
-                onClick={() => handleMarkApplied(job.id)}
-                disabled={markingApplied === job.id}
-                style={{
-                  background: "#0f172a",
+                  background: restoring === job.id ? "#333" : "#0f172a",
                   color: "#93c5fd",
                   border: "1px solid #1e3a8a",
                   padding: "4px 10px",
                   borderRadius: 4,
                   fontSize: 10,
-                  cursor: markingApplied === job.id ? "default" : "pointer",
+                  cursor: restoring === job.id ? "default" : "pointer",
                   fontWeight: 600,
                 }}
               >
-                {markingApplied === job.id ? "..." : "Mark Applied"}
+                {restoring === job.id ? "..." : "Restore"}
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {mode === "active" ? (
+                <>
+                  <button
+                    onClick={() => handleApply(job.id)}
+                    disabled={applying === job.id}
+                    style={{
+                      background: applying === job.id ? "#333" : "#8b5cf6",
+                      color: "#fff",
+                      border: "none",
+                      padding: "4px 12px",
+                      borderRadius: 4,
+                      fontSize: 10,
+                      cursor: "pointer",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {applying === job.id ? "..." : "Apply"}
+                  </button>
+                  <button
+                    onClick={() => handleMarkApplied(job.id)}
+                    disabled={markingApplied === job.id}
+                    style={{
+                      background: "#0f172a",
+                      color: "#93c5fd",
+                      border: "1px solid #1e3a8a",
+                      padding: "4px 10px",
+                      borderRadius: 4,
+                      fontSize: 10,
+                      cursor: markingApplied === job.id ? "default" : "pointer",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {markingApplied === job.id ? "..." : "Mark Applied"}
+                  </button>
+                </>
+              ) : (
+                <span style={{ fontSize: 10, color: "#666" }}>
+                  Applied {job.date_applied ? formatDate(job.date_applied) : ""}
+                </span>
+              )}
+              <button
+                onClick={() => handleArchive(job.id)}
+                disabled={archiving === job.id}
+                style={{
+                  background: archiving === job.id ? "#333" : "#1f2937",
+                  color: "#fcd34d",
+                  border: "1px solid #92400e",
+                  padding: "4px 10px",
+                  borderRadius: 4,
+                  fontSize: 10,
+                  cursor: archiving === job.id ? "default" : "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                {archiving === job.id ? "..." : "Archive"}
               </button>
             </div>
           )}
@@ -507,11 +594,11 @@ export default function JobCommandCenter() {
     );
   };
 
-  const JobTable = ({ jobs, greyed = false }) => (
+  const JobTable = ({ jobs, mode = "active" }) => (
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr style={{ borderBottom: "1px solid #222" }}>
-          {["Title", "Company", "Location", "Salary", "Match", "ATS", "Found", ""].map((heading) => (
+          {["Title", "Company", "Location", "Salary", "Match", "ATS", "Found", mode === "archived" ? "Archive" : "Actions"].map((heading) => (
             <th
               key={heading}
               style={{
@@ -531,7 +618,7 @@ export default function JobCommandCenter() {
       </thead>
       <tbody>
         {jobs.map((job) => (
-          <JobRow key={job.id} job={job} greyed={greyed} />
+          <JobRow key={job.id} job={job} mode={mode} />
         ))}
       </tbody>
     </table>
@@ -757,10 +844,11 @@ export default function JobCommandCenter() {
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8, marginBottom: 12 }}>
           {[
-            { label: "Total", val: data.total, color: "#8b5cf6" },
+            { label: "Active", val: data.total, color: "#8b5cf6" },
             { label: "New Today", val: data.newToday?.length || 0, color: "#10b981" },
             { label: "Previously Seen", val: data.previouslySeen?.length || 0, color: "#f59e0b" },
             { label: "Applied", val: data.applied?.length || 0, color: "#3b82f6" },
+            { label: "Archived", val: data.archived_total || 0, color: "#fcd34d" },
             { label: "Partial Data", val: data.scrape_stats?.detail_fetch_failed || 0, color: "#f59e0b" },
           ].map((stat) => (
             <div key={stat.label} style={{ background: "#111118", border: "1px solid #1a1a22", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
@@ -836,7 +924,7 @@ export default function JobCommandCenter() {
           <>
             <SectionHeader title="New Today" count={filterJobs(data.newToday).length} color="#10b981" />
             <div style={{ background: "#0d0d15", border: "1px solid #1a2a1a", borderRadius: 8, overflow: "hidden" }}>
-              <JobTable jobs={filterJobs(data.newToday)} />
+              <JobTable jobs={filterJobs(data.newToday)} mode="active" />
             </div>
           </>
         )}
@@ -845,7 +933,7 @@ export default function JobCommandCenter() {
           <>
             <SectionHeader title="Previously Seen" count={filterJobs(data.previouslySeen).length} color="#f59e0b" />
             <div style={{ background: "#0d0d15", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
-              <JobTable jobs={filterJobs(data.previouslySeen)} />
+              <JobTable jobs={filterJobs(data.previouslySeen)} mode="active" />
             </div>
           </>
         )}
@@ -854,12 +942,64 @@ export default function JobCommandCenter() {
           <>
             <SectionHeader title="Applied" count={filterJobs(data.applied).length} color="#3b82f6" />
             <div style={{ background: "#0a0a10", border: "1px solid #1a1a22", borderRadius: 8, overflow: "hidden" }}>
-              <JobTable jobs={filterJobs(data.applied)} greyed={true} />
+              <JobTable jobs={filterJobs(data.applied)} mode="applied" />
             </div>
           </>
         )}
 
-        {data.total === 0 && (
+        {data.total === 0 && data.archived_total > 0 && (
+          <div style={{ textAlign: "center", padding: "24px 20px", color: "#666", fontSize: 11 }}>
+            No active jobs right now. Archived roles are still available below for reference or restore.
+          </div>
+        )}
+
+        {data.archived_total > 0 && (
+          <div style={{ marginTop: 20 }}>
+            <button
+              onClick={() => setShowArchived((current) => !current)}
+              style={{
+                width: "100%",
+                background: "#111118",
+                border: "1px solid #2a2415",
+                borderRadius: 8,
+                padding: "12px 14px",
+                color: "#f3f4f6",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                textAlign: "left",
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "#fcd34d" }}>
+                  Archived Jobs ({filteredArchivedJobs.length})
+                </div>
+                <div style={{ fontSize: 10, color: "#7c7c86", marginTop: 4 }}>
+                  Stored separately from the active board so future scrapes stay clean.
+                </div>
+              </div>
+              <span style={{ fontSize: 11, color: "#a1a1aa", fontWeight: 600 }}>
+                {showArchived ? "Hide" : "Show"}
+              </span>
+            </button>
+
+            {showArchived && (
+              filteredArchivedJobs.length > 0 ? (
+                <div style={{ background: "#0a0a10", border: "1px solid #2a2415", borderRadius: 8, overflow: "hidden", marginTop: 10 }}>
+                  <JobTable jobs={filteredArchivedJobs} mode="archived" />
+                </div>
+              ) : (
+                <div style={{ background: "#0a0a10", border: "1px solid #2a2415", borderRadius: 8, padding: "16px 18px", marginTop: 10, fontSize: 11, color: "#7c7c86" }}>
+                  No archived jobs match the current filters.
+                </div>
+              )
+            )}
+          </div>
+        )}
+
+        {data.total === 0 && data.archived_total === 0 && (
           <div style={{ textAlign: "center", padding: "60px 20px", color: "#444" }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}>&#128269;</div>
             <div style={{ fontSize: 14, fontFamily: "'Space Grotesk', sans-serif", marginBottom: 8 }}>

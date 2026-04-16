@@ -6,7 +6,7 @@ The repo has four core pieces:
 
 - `src/` renders the dashboard for scraped jobs and apply controls.
 - `server/index.ts` serves the API used by the frontend.
-- `server/agents/scrape-agent.ts` searches the web via Serper, parses job pages, and writes results to `server/data/jobs.json`.
+- `server/agents/scrape-agent.ts` searches the web via Serper, parses job pages, and writes active results to `server/data/jobs.json`.
 - `server/agents/apply-agent.ts` runs the interactive application flow with Playwright MCP and custom profile/apply tools.
 
 ## Setup
@@ -49,7 +49,7 @@ npm run build        # production frontend build
 1. The scraper generates a query matrix from `server/config/scrape-config.ts`.
 2. Serper returns candidate URLs.
 3. `server/scraper/batch-parser.ts` tries fast extractors first, then Anthropic parsing when needed.
-4. `server/scraper/dedup.ts` normalizes and persists jobs in `server/data/jobs.json`.
+4. `server/scraper/dedup.ts` normalizes and persists active jobs in `server/data/jobs.json`, while archived jobs are moved to `server/data/archived-jobs.json`.
 5. The dashboard calls `/api/jobs`, `/api/scrape`, and apply endpoints from `src/App.jsx`.
 6. The apply agent loads `profile.yaml`, reads the resume, drives the browser, pauses for confirmation, and only then marks a job applied.
 
@@ -65,6 +65,6 @@ npm run build        # production frontend build
 
 ## Safety Notes
 
-- Do not commit `.env`, `profile.yaml`, `resume.pdf`, or `server/data/jobs.json`
+- Do not commit `.env`, `profile.yaml`, `resume.pdf`, `server/data/jobs.json`, or `server/data/archived-jobs.json`
 - The apply flow is designed to pause before submission for human confirmation
 - Only one apply session should run at a time because it uses the shared terminal/browser
