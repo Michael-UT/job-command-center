@@ -7,6 +7,7 @@ import { z } from "zod";
 import { loadJobs, saveJobs, markApplied } from "../scraper/dedup.js";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import * as readline from "readline/promises";
 
 const PROJECT_ROOT = process.cwd();
 const APP_LOG_PATH = join(PROJECT_ROOT, "applications_log.json");
@@ -40,6 +41,13 @@ interface ApplicationLogEntry {
   custom_answers: Record<string, string>;
   submitted: boolean;
   timestamp: string;
+}
+
+async function prompt(question: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question(question);
+  rl.close();
+  return answer;
 }
 
 const logApplication = tool(
@@ -82,8 +90,72 @@ const logApplication = tool(
   },
 );
 
+const waitForUserHandoff = tool(
+  "wait_for_user_handoff",
+  "Pause after the first-pass autofill so the user can finish reviewing/submitting in the browser without the agent touching the page again. Returns whether the user says they submitted.",
+  {
+    company: z.string().default("Unknown").describe("Company name"),
+    title: z.string().default("Unknown").describe("Job title"),
+    autofilled_fields: z.array(z.string()).default([]).describe("High-confidence fields the agent filled"),
+    manual_review_items: z.array(z.string()).default([]).describe("Fields or sections the user should review/fill manually"),
+    notes: z.string().default("").describe("Short additional note for the handoff"),
+  },
+  async (args) => {
+    try {
+      console.log(`\n  Browser handoff: ${args.title} @ ${args.company}`);
+      console.log("  Autofill first pass is complete. The agent will stop touching the browser now.");
+
+      if (args.autofilled_fields.length > 0) {
+        console.log("\n  Autofilled:");
+        for (const item of args.autofilled_fields) {
+          console.log(`  - ${item}`);
+        }
+      }
+
+      if (args.manual_review_items.length > 0) {
+        console.log("\n  Review manually:");
+        for (const item of args.manual_review_items) {
+          console.log(`  - ${item}`);
+        }
+      }
+
+      if (args.notes.trim()) {
+        console.log(`\n  Note: ${args.notes.trim()}`);
+      }
+
+      console.log("\n  Finish the remaining fields and submit in the browser if you want.");
+      console.log('  Then return here and type "submitted" or "not submitted".');
+      console.log("  [Browser stays open while waiting here]");
+
+      const response = (await prompt("  > ")).trim().toLowerCase();
+      const submitted = response === "submitted" || response === "submit" || response === "yes" || response === "y";
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                submitted,
+                raw_response: response || "not submitted",
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 export const applyToolsServer = createSdkMcpServer({
   name: "apply_tools",
   version: "1.0.0",
-  tools: [markJobApplied, logApplication],
+  tools: [markJobApplied, logApplication, waitForUserHandoff],
 });

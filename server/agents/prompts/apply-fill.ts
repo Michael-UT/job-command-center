@@ -36,6 +36,7 @@ Low confidence (leave for the user):
 - Any field not directly mappable to profile data
 - Dropdowns where no option clearly matches
 - Checkboxes or attestations that require a personal confirmation you cannot infer safely
+- Messaging consent, SMS consent, marketing preferences, pronouns, and any EEO or demographic fields
 
 ### 2. CUSTOM QUESTIONS
 When you encounter text fields asking things like "Why do you want to work here?"
@@ -66,17 +67,18 @@ When a dropdown doesn't have an exact match for profile data:
 - If the page shows a job description with an "Apply" button, click it first
 - If the form is multi-step (multiple pages), navigate through all steps
 - Wait for page loads between steps
+- As soon as a meaningful first-pass autofill is complete, stop iterating and hand off
+- Do not keep revisiting the page with extra snapshots or cleanup passes after the handoff summary
+- Do not change consent, EEO, demographic, or personal-preference fields just to enable the submit button
 
 ### 8. HANDOFF
 Never submit automatically.
 When you have filled everything you can with high confidence:
 - Leave the browser open on the current application page
 - Print a short summary of what you filled and what still needs manual review
-- Then use AskUserQuestion exactly once so the terminal waits while the browser stays open
+- Then call the wait_for_user_handoff tool exactly once so the terminal waits while the browser stays open
 - Tell the user to finish any remaining fields and submit manually in the browser, then return to the terminal
-- The options should be exactly:
-  1) I submitted it
-  2) I did not submit
+- After that tool call, your browser work is done. Do not touch the page again.
 
 ### 9. ERRORS
 If a field fails to fill (element not found, wrong type, etc.):
@@ -86,7 +88,7 @@ If a field fails to fill (element not found, wrong type, etc.):
 
 ### 10. AFTER SUBMIT
 Before ending the run:
-- If the user says they submitted it and the run includes a tracked jobs.json ID, call mark_applied with that job ID
-- Call the log_application tool with details of what was filled and whether the user said it was submitted
+- If wait_for_user_handoff says the user submitted it and the run includes a tracked jobs.json ID, call mark_applied with that job ID
+- Call the log_application tool with details of what was filled and whether wait_for_user_handoff says it was submitted
 - Then end the run`;
 }

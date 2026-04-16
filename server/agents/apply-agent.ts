@@ -19,7 +19,6 @@ import { loadJobs } from "../scraper/dedup.js";
 import { profileServer } from "../tools/profile-tools.js";
 import { applyToolsServer } from "../tools/apply-tools.js";
 import { buildApplySystemPrompt } from "./prompts/apply-fill.js";
-import * as readline from "readline/promises";
 
 const args = process.argv.slice(2);
 const BATCH_MODE = args.includes("--batch");
@@ -42,31 +41,20 @@ interface ApplyTarget {
   company: string | null;
 }
 
-interface AskUserOption {
-  label?: string;
-}
-
-interface AskUserQuestionInput {
-  question?: string;
-  options?: AskUserOption[];
-}
-
-const FINAL_HANDOFF_PATTERN = /\b(submit|submitted|browser|review|manual|ready|done)\b/i;
+const AUTOFILL_TOOL_NAMES = new Set([
+  "mcp__playwright__browser_fill_form",
+  "mcp__playwright__browser_file_upload",
+  "mcp__playwright__browser_type",
+  "mcp__playwright__browser_select_option",
+]);
+const HANDOFF_TOOL_NAME = "mcp__apply_tools__wait_for_user_handoff";
 
 function isAllowedAgentTool(toolName: string): boolean {
   return (
-    toolName === "AskUserQuestion"
-    || toolName.startsWith("mcp__playwright__")
+    toolName.startsWith("mcp__playwright__")
     || toolName.startsWith("mcp__profile__")
     || toolName.startsWith("mcp__apply_tools__")
   );
-}
-
-async function prompt(question: string): Promise<string> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await rl.question(question);
-  rl.close();
-  return answer;
 }
 
 async function applyToJob(job: ApplyTarget) {
@@ -98,13 +86,15 @@ Steps:
 6. Do not use WebFetch or ToolSearch for this run; the user wants a live browser workflow
 7. Do not ask the user to answer custom questions mid-run; leave low-confidence, free-text, salary, and personal-attestation fields for manual review
 8. Do not submit automatically
-9. When the browser is ready for the user, show a short handoff summary and then use AskUserQuestion exactly once so the terminal waits while the browser stays open
-10. Tell the user to review, finish any remaining fields, submit manually in the browser, then return to the terminal and answer
-11. ${job.id ? `If the user says they submitted it, call mark_applied with job ID "${job.id}"` : "If the user says they submitted it, skip mark_applied because there is no tracked job ID"}
-12. Call log_application with details of what was filled and whether the user said it was submitted. Use job_id "${job.id || "manual"}" in the log.`;
+9. When the browser is ready for the user, call wait_for_user_handoff exactly once so the terminal waits while the browser stays open and the agent stops touching the page
+10. Tell the user to review, finish any remaining fields, submit manually in the browser, then return to the terminal and answer there
+11. ${job.id ? `If wait_for_user_handoff says the user submitted it, call mark_applied with job ID "${job.id}"` : "If wait_for_user_handoff says the user submitted it, skip mark_applied because there is no tracked job ID"}
+12. Call log_application with details of what was filled and whether wait_for_user_handoff says it was submitted. Use job_id "${job.id || "manual"}" in the log.`;
 
   try {
     let usedPlaywright = false;
+    let autofillWorkDone = false;
+    let handoffStarted = false;
 
     for await (const message of query({
       prompt: applyPrompt,
@@ -117,17 +107,16 @@ Steps:
           apply_tools: applyToolsServer,
         },
         allowedTools: [
-          "AskUserQuestion",
           "mcp__playwright__*",
           "mcp__profile__*",
           "mcp__apply_tools__*",
         ],
-        tools: ["AskUserQuestion"],
+        tools: [],
         model: APPLY_AGENT_MODEL,
         effort: "medium",
         maxTurns: 50,
         maxBudgetUsd: APPLY_AGENT_MAX_BUDGET_USD,
-        permissionMode: "default",
+        permissionMode: "dontAsk",
         canUseTool: async (toolName: string, input: any) => {
           if (!isAllowedAgentTool(toolName)) {
             return {
@@ -136,67 +125,41 @@ Steps:
             };
           }
 
-          if (toolName.startsWith("mcp__playwright__")) {
-            usedPlaywright = true;
+          if (
+            handoffStarted
+            && (
+              toolName.startsWith("mcp__playwright__")
+              || toolName.startsWith("mcp__profile__")
+              || toolName === HANDOFF_TOOL_NAME
+            )
+          ) {
+            return {
+              behavior: "deny" as const,
+              message:
+                "The first-pass autofill handoff has already started. Do not touch the browser again. Only finish logging and marking the job if needed.",
+            };
           }
 
-          if (toolName === "AskUserQuestion") {
-            const answers: Record<string, string> = {};
-            const safeQuestions = (input.questions || [])
-              .slice(0, 1)
-              .map((question: AskUserQuestionInput) => ({
-                ...question,
-                question: String(question.question || "").slice(0, 500),
-                options: (question.options || []).slice(0, 3).map((option: AskUserOption) => ({
-                  ...option,
-                  label: String(option.label || "").slice(0, 120),
-                })),
-              }));
-
-            const questionText = safeQuestions
-              .map((question: AskUserQuestionInput) =>
-                `${question.question || ""} ${(question.options || []).map((option: AskUserOption) => option.label || "").join(" ")}`,
-              )
-              .join(" ");
-
-            if (!usedPlaywright) {
-              return {
-                behavior: "deny" as const,
-                message: "Open the visible Playwright browser and work through the form before asking the user anything.",
-              };
+          if (toolName.startsWith("mcp__playwright__")) {
+            usedPlaywright = true;
+            if (AUTOFILL_TOOL_NAMES.has(toolName)) {
+              autofillWorkDone = true;
             }
+          }
 
-            if (!FINAL_HANDOFF_PATTERN.test(questionText)) {
+          if (toolName === HANDOFF_TOOL_NAME) {
+            if (!usedPlaywright || !autofillWorkDone) {
               return {
                 behavior: "deny" as const,
                 message:
-                  "Do not ask the user mid-run. Only use AskUserQuestion once for the final browser handoff after the form is ready for review/submission.",
+                  "Do the first-pass autofill before handing off. Open the browser, fill high-confidence fields, then call wait_for_user_handoff once.",
               };
             }
 
-            for (const q of safeQuestions) {
-              const options = q.options || [];
-              const optStr = options.map((option: AskUserOption, index: number) => `${index + 1}) ${option.label}`).join("  ");
-              console.log(`\n  ${q.question}`);
-              console.log(`  ${optStr}`);
-              console.log(`  [Browser stays open while waiting here]`);
-              const response = (await prompt("  > ")).trim();
-
-              if (response === "" && options.length > 0) {
-                answers[q.question || "response"] = options[0].label || "";
-              } else {
-                const num = Number.parseInt(response, 10);
-                if (!Number.isNaN(num) && num >= 1 && num <= options.length) {
-                  answers[q.question || "response"] = options[num - 1].label || "";
-                } else {
-                  answers[q.question || "response"] = response;
-                }
-              }
-            }
-
+            handoffStarted = true;
             return {
               behavior: "allow" as const,
-              updatedInput: { questions: safeQuestions, answers },
+              updatedInput: input,
             };
           }
 
