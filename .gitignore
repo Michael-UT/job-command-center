@@ -14,3 +14,6 @@ resume.pdf
 
 # Generated data
 server/data/jobs.json
+
+# Runtime state
+.claude/
