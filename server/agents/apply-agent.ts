@@ -15,8 +15,8 @@ config();
 process.env.CLAUDE_CODE_MAX_TURN_TIMEOUT_MS = process.env.CLAUDE_CODE_MAX_TURN_TIMEOUT_MS || "300000";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { loadJobs, saveJobs, type Job } from "../scraper/dedup.js";
-import { profileServer, loadProfileFromDisk } from "../tools/profile-tools.js";
+import { loadJobs } from "../scraper/dedup.js";
+import { profileServer } from "../tools/profile-tools.js";
 import { applyToolsServer } from "../tools/apply-tools.js";
 import { buildApplySystemPrompt } from "./prompts/apply-fill.js";
 import * as readline from "readline/promises";
@@ -24,7 +24,32 @@ import * as readline from "readline/promises";
 const args = process.argv.slice(2);
 const BATCH_MODE = args.includes("--batch");
 const limitIdx = args.indexOf("--limit");
-const BATCH_LIMIT = limitIdx >= 0 ? parseInt(args[limitIdx + 1], 10) : Infinity;
+const parsedBatchLimit = limitIdx >= 0 ? Number.parseInt(args[limitIdx + 1] || "", 10) : null;
+const BATCH_LIMIT =
+  parsedBatchLimit !== null && Number.isInteger(parsedBatchLimit) && parsedBatchLimit > 0
+    ? parsedBatchLimit
+    : Infinity;
+const APPLY_AGENT_MODEL = process.env.APPLY_AGENT_MODEL || "claude-sonnet-4-6";
+const APPLY_AGENT_MAX_BUDGET_USD = (() => {
+  const parsed = Number.parseFloat(process.env.APPLY_AGENT_MAX_BUDGET_USD || "2");
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 2;
+})();
+
+interface ApplyTarget {
+  id: string | null;
+  url: string;
+  title: string | null;
+  company: string | null;
+}
+
+interface AskUserOption {
+  label?: string;
+}
+
+interface AskUserQuestionInput {
+  question?: string;
+  options?: AskUserOption[];
+}
 
 // Helper to prompt user in terminal
 async function prompt(question: string): Promise<string> {
@@ -34,32 +59,37 @@ async function prompt(question: string): Promise<string> {
   return answer;
 }
 
-async function applyToJob(job: { id: string; url: string; title: string | null; company: string | null }) {
+async function applyToJob(job: ApplyTarget) {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  Applying to: ${job.title || "Unknown"} at ${job.company || "Unknown"}`);
   console.log(`  URL: ${job.url}`);
-  console.log(`  Job ID: ${job.id}`);
+  console.log(`  Job ID: ${job.id || "manual (not tracked in jobs.json)"}`);
   console.log(`${"=".repeat(60)}\n`);
 
-  const profile = loadProfileFromDisk();
-  const systemPrompt = buildApplySystemPrompt(profile);
+  const systemPrompt = buildApplySystemPrompt();
+  const trackingInstructions = job.id
+    ? `This application is tracked in jobs.json.
+Job ID for marking as applied after submission: ${job.id}`
+    : `This application came from a direct URL and is not tracked in jobs.json.
+Do not call mark_applied for this run.`;
 
   const applyPrompt = `Apply to this job posting: ${job.url}
 
-Job ID for marking as applied after submission: ${job.id}
+${trackingInstructions}
 Job title: ${job.title || "Unknown"}
 Company: ${job.company || "Unknown"}
 
 Steps:
 1. First call load_profile to get the applicant's profile data
-2. Call get_resume_text to read the resume content for answering custom questions
+2. Call get_resume_path to get the file path for uploading the configured resume file
 3. Navigate to the job URL in the browser
 4. If there's an "Apply" button, click it to reach the application form
 5. Fill out the form following the behavioral rules in your system prompt
-6. For any field you're not >90% confident about, ask the user via AskUserQuestion
-7. Before submitting, show a complete summary and ask for confirmation
-8. After confirmed submission, call mark_applied with job ID "${job.id}"
-9. Call log_application with details of what was filled`;
+6. Only call get_background_context or get_resume_text if a written answer or ambiguous field truly needs them
+7. For any field you're not >90% confident about, ask the user via AskUserQuestion
+8. Before submitting, show a complete summary and ask for confirmation
+9. ${job.id ? `After confirmed submission, call mark_applied with job ID "${job.id}"` : "After confirmed submission, skip mark_applied because there is no tracked job ID"}
+10. Call log_application with details of what was filled. Use job_id "${job.id || "manual"}" in the log.`;
 
   try {
     for await (const message of query({
@@ -78,14 +108,27 @@ Steps:
           "mcp__profile__*",
           "mcp__apply_tools__*",
         ],
+        model: APPLY_AGENT_MODEL,
+        effort: "medium",
         maxTurns: 50,
+        maxBudgetUsd: APPLY_AGENT_MAX_BUDGET_USD,
         permissionMode: "default",
         canUseTool: async (toolName: string, input: any) => {
           // AskUserQuestion — present to user in terminal
           if (toolName === "AskUserQuestion") {
             const answers: Record<string, string> = {};
+            const safeQuestions = (input.questions || [])
+              .slice(0, 3)
+              .map((question: AskUserQuestionInput) => ({
+                ...question,
+                question: String(question.question || "").slice(0, 400),
+                options: (question.options || []).slice(0, 5).map((option) => ({
+                  ...option,
+                  label: String(option.label || "").slice(0, 120),
+                })),
+              }));
 
-            for (const q of input.questions || []) {
+            for (const q of safeQuestions) {
               const options = q.options || [];
               // Compact display: question + options on fewer lines
               const optStr = options.map((o: any, i: number) => `${i + 1}) ${o.label}`).join("  ");
@@ -110,7 +153,7 @@ Steps:
 
             return {
               behavior: "allow" as const,
-              updatedInput: { questions: input.questions, answers },
+              updatedInput: { questions: safeQuestions, answers },
             };
           }
 
@@ -151,6 +194,11 @@ async function main() {
   console.log(`╚${"═".repeat(56)}╝\n`);
 
   if (BATCH_MODE) {
+    if (limitIdx >= 0 && BATCH_LIMIT === Infinity) {
+      console.error('  Invalid --limit value. Use a positive integer, for example "--limit 5".');
+      return;
+    }
+
     // Batch: apply to all "new" jobs
     const data = loadJobs();
     const newJobs = data.jobs.filter((j) => j.status === "new");
@@ -192,7 +240,7 @@ async function main() {
     // Check if it's a job ID or a URL
     if (target.startsWith("http")) {
       // Direct URL mode
-      await applyToJob({ id: "manual", url: target, title: null, company: null });
+      await applyToJob({ id: null, url: target, title: null, company: null });
     } else {
       // Job ID mode
       const data = loadJobs();

@@ -48,10 +48,11 @@ const logApplication = tool(
   {
     job_id: z.string().describe("Job ID"),
     url: z.string().describe("Job URL"),
-    company: z.string().describe("Company name"),
-    title: z.string().describe("Job title"),
+    company: z.string().default("Unknown").describe("Company name"),
+    title: z.string().default("Unknown").describe("Job title"),
     fields_filled: z.array(z.string()).default([]).describe("Fields that were filled"),
     fields_skipped: z.array(z.string()).default([]).describe("Fields that were skipped"),
+    custom_answers: z.record(z.string(), z.string()).default({}).describe("Question -> answer pairs entered during the application"),
     submitted: z.boolean().describe("Whether form was submitted"),
   },
   async (args) => {
@@ -68,7 +69,7 @@ const logApplication = tool(
         title: args.title,
         fields_filled: args.fields_filled,
         fields_skipped: args.fields_skipped,
-        custom_answers: {},
+        custom_answers: args.custom_answers,
         submitted: args.submitted,
         timestamp: new Date().toISOString(),
       });

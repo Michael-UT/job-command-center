@@ -9,6 +9,8 @@ import { config } from "dotenv";
 config();
 
 import { generateQueryMatrix, detectATS } from "../config/scrape-config.js";
+import { loadSearchProfile } from "../config/search-profile.js";
+import { extractJobMatchContext } from "../matching/context.js";
 import { parseSinglePage } from "../scraper/batch-parser.js";
 import { loadJobs, saveJobs, mergeNewJobs, isDuplicate } from "../scraper/dedup.js";
 
@@ -21,6 +23,7 @@ if (!SERPER_API_KEY) {
 }
 
 interface SearchResult { url: string; title: string; snippet: string; }
+interface SearchResponse { results: SearchResult[]; error: string | null; }
 
 // URLs that are search/index pages, not actual job postings
 const JUNK_URL_PATTERNS = [
@@ -100,7 +103,7 @@ function isJunk(url: string, title: string): boolean {
 }
 
 // Call Serper.dev Google Search API
-async function serperSearch(query: string): Promise<SearchResult[]> {
+async function serperSearch(query: string): Promise<SearchResponse> {
   try {
     const res = await fetch("https://google.serper.dev/search", {
       method: "POST",
@@ -112,8 +115,9 @@ async function serperSearch(query: string): Promise<SearchResult[]> {
     });
 
     if (!res.ok) {
+      const error = `serper_http_${res.status}: ${res.statusText}`;
       console.error(`    Serper error: ${res.status} ${res.statusText}`);
-      return [];
+      return { results: [], error };
     }
 
     const data = await res.json() as any;
@@ -128,10 +132,11 @@ async function serperSearch(query: string): Promise<SearchResult[]> {
       });
     }
 
-    return results;
+    return { results, error: null };
   } catch (e) {
-    console.error(`    Serper request failed: ${e}`);
-    return [];
+    const error = e instanceof Error ? e.message : String(e);
+    console.error(`    Serper request failed: ${error}`);
+    return { results: [], error };
   }
 }
 
@@ -153,13 +158,15 @@ async function fetchPage(url: string): Promise<string | null> {
 async function main() {
   console.log("\n=== Job Command Center — Scrape Agent ===\n");
 
-  const allQueries = generateQueryMatrix();
+  const searchProfile = loadSearchProfile();
+  const allQueries = generateQueryMatrix(searchProfile);
   const queries = QUICK_MODE
     ? allQueries.filter((q) => q.siteOperator.includes("site:"))
     : allQueries;
 
   console.log(`Mode: ${QUICK_MODE ? "QUICK (ATS sites only)" : "FULL"}`);
   console.log(`Queries to execute: ${queries.length}`);
+  console.log(`Target roles: ${searchProfile.titles.length} | Qualification keywords: ${searchProfile.qualificationKeywords.length}`);
   console.log(`Search API: Serper.dev (free tier)\n`);
 
   const jobsData = loadJobs();
@@ -174,9 +181,17 @@ async function main() {
     const q = queries[i];
     process.stdout.write(`  [${i + 1}/${queries.length}] ${q.siteName}... `);
 
-    const results = await serperSearch(q.query);
+    const { results, error } = await serperSearch(q.query);
     console.log(`${results.length} results`);
     allSearchResults.push(...results);
+    if (error) {
+      errors.push({
+        source: q.siteName,
+        query: q.query,
+        error,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     // Don't log zero-result queries as errors — they're normal for niche titles
 
@@ -210,8 +225,9 @@ async function main() {
   // Step 3: Fetch pages + parse
   console.log(`\n  Fetching & parsing ${uniqueUrls.size} pages...`);
   let fetchCount = 0;
-  let fetchFailed = 0;
+  let detailFailures = 0;
   let parseSuccess = 0;
+  let addedThisRun = 0;
 
   for (const [url, result] of uniqueUrls) {
     fetchCount++;
@@ -219,12 +235,25 @@ async function main() {
 
     const html = await fetchPage(url);
     if (!html) {
-      fetchFailed++;
+      detailFailures++;
       // Add with search snippet info
-      mergeNewJobs(jobsData, [{
-        url, title: result.title || null, company: null, ats: detectATS(url),
-        location: null, salary: null, seniority: null, source: "serper", scrape_detail_failed: true,
+      addedThisRun += mergeNewJobs(jobsData, [{
+        url,
+        title: result.title || null,
+        company: null,
+        ats: detectATS(url),
+        location: null,
+        salary: null,
+        seniority: null,
+        source: "serper",
+        scrape_detail_failed: true,
       }]);
+      errors.push({
+        source: detectATS(url),
+        query: url,
+        error: "fetch_failed",
+        timestamp: new Date().toISOString(),
+      });
       console.log(`⚠ Fetch failed — ${result.title?.slice(0, 50)}`);
       continue;
     }
@@ -237,49 +266,94 @@ async function main() {
         if (isNonUS(parsed.location, parsed.title)) {
           console.log(`✗ Non-US: ${parsed.location || parsed.title}`);
         } else {
-          mergeNewJobs(jobsData, [{
-            url, title: parsed.title || result.title || null, company: parsed.company,
-            ats: parsed.ats, location: parsed.location, salary: parsed.salary,
-            seniority: parsed.seniority, source: parsed.source, scrape_detail_failed: false,
+          const matchContext = extractJobMatchContext(html);
+          const added = mergeNewJobs(jobsData, [{
+            url,
+            title: parsed.title || result.title || null,
+            company: parsed.company,
+            ats: parsed.ats,
+            location: parsed.location,
+            salary: parsed.salary,
+            seniority: parsed.seniority,
+            source: parsed.source,
+            scrape_detail_failed: false,
+            description_text: matchContext.descriptionText,
+            qualification_text: matchContext.qualificationText,
           }]);
+          addedThisRun += added;
           parseSuccess++;
-          console.log(`✓ ${(parsed.title || "?").slice(0, 40)} @ ${parsed.company || "?"} | ${parsed.salary || "-"}`);
+          if (added > 0) {
+            console.log(`✓ ${(parsed.title || "?").slice(0, 40)} @ ${parsed.company || "?"} | ${parsed.salary || "-"}`);
+          } else {
+            console.log(`↺ Duplicate listing — ${(parsed.title || result.title || "?").slice(0, 40)}`);
+          }
         }
       } else if (parsed.status === "closed") {
         console.log(`✗ Closed`);
+      } else if (parsed.parse_failed) {
+        detailFailures++;
+        addedThisRun += mergeNewJobs(jobsData, [{
+          url,
+          title: result.title || null,
+          company: null,
+          ats: detectATS(url),
+          location: null,
+          salary: null,
+          seniority: null,
+          source: "serper",
+          scrape_detail_failed: true,
+        }]);
+        errors.push({
+          source: detectATS(url),
+          query: url,
+          error: parsed.parse_fail_reason || "parse_failed",
+          timestamp: new Date().toISOString(),
+        });
+        console.log(`⚠ Parse failed — ${parsed.parse_fail_reason?.slice(0, 40)}`);
       } else if (!parsed.is_job_posting) {
         console.log(`✗ Not a job`);
-      } else if (parsed.parse_failed) {
-        mergeNewJobs(jobsData, [{
-          url, title: result.title || null, company: null, ats: detectATS(url),
-          location: null, salary: null, seniority: null, source: "serper", scrape_detail_failed: true,
-        }]);
-        console.log(`⚠ Parse failed — ${parsed.parse_fail_reason?.slice(0, 40)}`);
       }
     } catch (e) {
-      fetchFailed++;
-      console.log(`✗ Error: ${e}`);
+      const error = e instanceof Error ? e.message : String(e);
+      detailFailures++;
+      addedThisRun += mergeNewJobs(jobsData, [{
+        url,
+        title: result.title || null,
+        company: null,
+        ats: detectATS(url),
+        location: null,
+        salary: null,
+        seniority: null,
+        source: "serper",
+        scrape_detail_failed: true,
+      }]);
+      errors.push({
+        source: detectATS(url),
+        query: url,
+        error,
+        timestamp: new Date().toISOString(),
+      });
+      console.log(`✗ Error: ${error}`);
     }
 
     await new Promise((r) => setTimeout(r, 100));
   }
 
   // Step 4: Save
-  const today = new Date().toISOString().split("T")[0];
-  const newCount = jobsData.jobs.filter((j) => j.date_found === today && j.status === "new").length;
-
   jobsData.last_scraped = new Date().toISOString();
   jobsData.scrape_stats = {
-    total_queries: queries.length, new_jobs_found: newCount,
-    duplicates_skipped: allSearchResults.length - uniqueUrls.size, detail_fetch_failed: fetchFailed,
+    total_queries: queries.length,
+    new_jobs_found: addedThisRun,
+    duplicates_skipped: allSearchResults.length - uniqueUrls.size,
+    detail_fetch_failed: detailFailures,
   };
   jobsData.scrape_errors = errors;
   saveJobs(jobsData);
 
   console.log("\n=== Scrape Complete ===");
-  console.log(`  Queries: ${queries.length} | New jobs: ${newCount} | Parsed: ${parseSuccess} | Failed: ${fetchFailed}`);
+  console.log(`  Queries: ${queries.length} | New jobs: ${addedThisRun} | Parsed: ${parseSuccess} | Detail failures: ${detailFailures}`);
   console.log(`  Total in database: ${jobsData.jobs.length}`);
-  console.log(`  Cost: $0.00 (Serper free tier + JSON-LD parsing)`);
+  console.log("  Parser path: fast extractors with Anthropic fallback when needed");
 }
 
 main().catch(console.error);

@@ -11,51 +11,214 @@ const ATS_COLORS = {
   indeed: "#2164f3",
   wellfound: "#000",
   yc: "#f26522",
+  builtin: "#14b8a6",
+  startup_jobs: "#f97316",
+  ai_jobs: "#06b6d4",
   unknown: "#555",
 };
 
-const STATUS_STYLES = {
-  new: { bg: "transparent", text: "#10b981", label: "New" },
-  applied: { bg: "#111118", text: "#555", label: "Applied" },
-  skipped: { bg: "#111118", text: "#444", label: "Skipped" },
-};
+const EMPTY_PROFILE = { titles: [], qualificationKeywords: [] };
+
+function sanitizeItem(value) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function addUniqueItem(items, rawValue) {
+  const value = sanitizeItem(rawValue);
+  if (!value) return items;
+  if (items.some((item) => item.toLowerCase() === value.toLowerCase())) return items;
+  return [...items, value];
+}
+
+function removeItem(items, index) {
+  return items.filter((_, itemIndex) => itemIndex !== index);
+}
+
+function profileEquals(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function getMatchColor(score) {
+  if (score >= 8) return "#10b981";
+  if (score >= 6) return "#3b82f6";
+  if (score >= 4) return "#f59e0b";
+  return "#555";
+}
+
+function ChipEditor({
+  label,
+  items,
+  inputValue,
+  onInputChange,
+  onAdd,
+  onRemove,
+  placeholder,
+  helpText,
+}) {
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 600, color: "#e0e0e5", marginBottom: 4 }}>
+          {label}
+        </div>
+        <div style={{ fontSize: 10, color: "#666" }}>{helpText}</div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          minHeight: 46,
+          background: "#0a0a10",
+          border: "1px solid #1a1a22",
+          borderRadius: 8,
+          padding: 8,
+        }}
+      >
+        {items.map((item, index) => (
+          <span
+            key={`${item}-${index}`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              background: "#171722",
+              border: "1px solid #252538",
+              borderRadius: 999,
+              padding: "5px 10px",
+              fontSize: 10,
+              color: "#d4d4dc",
+            }}
+          >
+            <span>{item}</span>
+            <button
+              onClick={() => onRemove(index)}
+              style={{
+                background: "none",
+                border: "none",
+                color: "#777",
+                cursor: "pointer",
+                fontSize: 11,
+                lineHeight: 1,
+              }}
+              aria-label={`Remove ${item}`}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+
+        <input
+          value={inputValue}
+          placeholder={placeholder}
+          onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              onAdd();
+            }
+          }}
+          style={{
+            flex: 1,
+            minWidth: 220,
+            background: "transparent",
+            border: "none",
+            color: "#e0e0e5",
+            fontSize: 11,
+            outline: "none",
+            padding: "6px 4px",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
 
 export default function JobCommandCenter() {
-  const [data, setData] = useState({ newToday: [], previouslySeen: [], applied: [], skipped: [], total: 0, last_scraped: null, scrape_stats: null, scrape_errors: [] });
-  const [view, setView] = useState("board");
+  const [data, setData] = useState({
+    newToday: [],
+    previouslySeen: [],
+    applied: [],
+    skipped: [],
+    total: 0,
+    last_scraped: null,
+    scrape_stats: null,
+    scrape_errors: [],
+  });
+  const [searchProfile, setSearchProfile] = useState(EMPTY_PROFILE);
+  const [savedSearchProfile, setSavedSearchProfile] = useState(EMPTY_PROFILE);
+  const [defaultProfile, setDefaultProfile] = useState(EMPTY_PROFILE);
+  const [profileStats, setProfileStats] = useState(null);
+  const [titleInput, setTitleInput] = useState("");
+  const [keywordInput, setKeywordInput] = useState("");
   const [search, setSearch] = useState("");
   const [filterATS, setFilterATS] = useState("all");
+  const [minMatch, setMinMatch] = useState("all");
   const [scraping, setScraping] = useState(false);
   const [applying, setApplying] = useState(null);
+  const [batchLimit, setBatchLimit] = useState("10");
   const [statusMsg, setStatusMsg] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
 
   const fetchJobs = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/jobs`);
       if (res.ok) setData(await res.json());
-    } catch { /* server not running */ }
+    } catch {
+      // server not running
+    }
   }, []);
 
-  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+  const fetchSearchProfile = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/search-profile`);
+      if (!res.ok) return;
+      const result = await res.json();
+      setSearchProfile(result.profile);
+      setSavedSearchProfile(result.profile);
+      setDefaultProfile(result.defaults);
+      setProfileStats(result.query_matrix);
+    } catch {
+      // server not running
+    }
+  }, []);
 
-  // Poll for updates every 10s while scraping
+  useEffect(() => {
+    fetchJobs();
+    fetchSearchProfile();
+  }, [fetchJobs, fetchSearchProfile]);
+
   useEffect(() => {
     if (!scraping) return;
     const interval = setInterval(fetchJobs, 10000);
     return () => clearInterval(interval);
   }, [scraping, fetchJobs]);
 
+  const profileDirty = useMemo(
+    () => !profileEquals(searchProfile, savedSearchProfile),
+    [savedSearchProfile, searchProfile],
+  );
+
   const handleScrape = async (quick = false) => {
     setScraping(true);
-    setStatusMsg("Scraping... check terminal for progress.");
+    setStatusMsg("Scraping with the current search profile. Check terminal for progress.");
     try {
-      const res = await fetch(`${API_BASE}/scrape`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ quick }) });
+      const res = await fetch(`${API_BASE}/scrape`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quick }),
+      });
       const result = await res.json();
       if (!res.ok) setStatusMsg(result.error || "Scrape failed");
       else setStatusMsg(`Scrape started (${result.mode} mode). Refresh in a few minutes.`);
-    } catch { setStatusMsg("Failed to start scrape. Is the server running?"); }
-    // Keep polling for ~5 min then stop
-    setTimeout(() => { setScraping(false); fetchJobs(); }, 300000);
+    } catch {
+      setStatusMsg("Failed to start scrape. Is the server running?");
+    }
+    setTimeout(() => {
+      setScraping(false);
+      fetchJobs();
+    }, 300000);
   };
 
   const handleApply = async (jobId) => {
@@ -64,81 +227,217 @@ export default function JobCommandCenter() {
     try {
       const res = await fetch(`${API_BASE}/apply/${jobId}`, { method: "POST" });
       const result = await res.json();
-      setStatusMsg(result.message || "Apply started");
-    } catch { setStatusMsg("Failed to start apply agent."); }
-    setTimeout(() => { setApplying(null); fetchJobs(); }, 5000);
+      if (!res.ok) setStatusMsg(result.error || "Failed to start apply agent.");
+      else setStatusMsg(result.message || "Apply started");
+    } catch {
+      setStatusMsg("Failed to start apply agent.");
+    }
+    setTimeout(() => {
+      setApplying(null);
+      fetchJobs();
+    }, 5000);
   };
 
   const handleApplyAllNew = async () => {
-    setStatusMsg("Batch apply started. Check terminal for interaction.");
+    const parsed = Number.parseInt(batchLimit, 10);
+    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : 10;
+    setStatusMsg(`Batch apply requested for up to ${limit} jobs. Check terminal for interaction.`);
     try {
-      const res = await fetch(`${API_BASE}/apply-all-new`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: 10 }) });
+      const res = await fetch(`${API_BASE}/apply-all-new`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit }),
+      });
       const result = await res.json();
-      setStatusMsg(result.message || "Batch apply started");
-    } catch { setStatusMsg("Failed to start batch apply."); }
+      if (!res.ok) setStatusMsg(result.error || "Failed to start batch apply.");
+      else setStatusMsg(result.message || `Batch apply started for up to ${limit} jobs`);
+    } catch {
+      setStatusMsg("Failed to start batch apply.");
+    }
+  };
+
+  const handleSaveProfile = async () => {
+    setProfileSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/search-profile`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(searchProfile),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        setStatusMsg(result.error || "Failed to save search profile.");
+        return;
+      }
+
+      setSearchProfile(result.profile);
+      setSavedSearchProfile(result.profile);
+      setDefaultProfile(result.defaults);
+      setProfileStats(result.query_matrix);
+      setStatusMsg("Search profile saved. The next scrape will use the updated titles and keywords.");
+      fetchJobs();
+    } catch {
+      setStatusMsg("Failed to save search profile.");
+    } finally {
+      setProfileSaving(false);
+    }
   };
 
   const filterJobs = (jobs) => {
-    let f = jobs;
+    let filtered = jobs;
+
     if (search) {
-      const s = search.toLowerCase();
-      f = f.filter(j => (j.title || "").toLowerCase().includes(s) || (j.company || "").toLowerCase().includes(s) || (j.location || "").toLowerCase().includes(s));
+      const lowerSearch = search.toLowerCase();
+      filtered = filtered.filter((job) =>
+        (job.title || "").toLowerCase().includes(lowerSearch)
+        || (job.company || "").toLowerCase().includes(lowerSearch)
+        || (job.location || "").toLowerCase().includes(lowerSearch),
+      );
     }
-    if (filterATS !== "all") f = f.filter(j => j.ats === filterATS);
-    return f;
+
+    if (filterATS !== "all") {
+      filtered = filtered.filter((job) => job.ats === filterATS);
+    }
+
+    if (minMatch !== "all") {
+      const threshold = Number.parseInt(minMatch, 10);
+      filtered = filtered.filter((job) => (job.match_score ?? -1) >= threshold);
+    }
+
+    return filtered;
   };
 
   const allATS = useMemo(() => {
     const all = [...data.newToday, ...data.previouslySeen, ...data.applied];
-    return [...new Set(all.map(j => j.ats))].sort();
+    return [...new Set(all.map((job) => job.ats))].sort();
   }, [data]);
 
   const formatDate = (iso) => {
     if (!iso) return "Never";
-    const d = new Date(iso);
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    const date = new Date(iso);
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+      + " "
+      + date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
   };
 
-  const JobRow = ({ job, greyed = false }) => (
-    <tr style={{ opacity: greyed ? 0.4 : 1, borderBottom: "1px solid #1a1a22" }}>
-      <td style={{ padding: "10px 12px", fontSize: 12, maxWidth: 280 }}>
-        <a href={job.url} target="_blank" rel="noopener noreferrer" style={{ color: greyed ? "#555" : "#c4b5fd", textDecoration: "none" }}>
-          {job.title || "Untitled"}
-        </a>
-      </td>
-      <td style={{ padding: "10px 8px", fontSize: 12, color: greyed ? "#444" : "#e0e0e5" }}>{job.company || "—"}</td>
-      <td style={{ padding: "10px 8px", fontSize: 11, color: greyed ? "#444" : "#888" }}>{job.location || "—"}</td>
-      <td style={{ padding: "10px 8px", fontSize: 11, color: job.salary ? (greyed ? "#444" : "#10b981") : "#333" }}>{job.salary || "—"}</td>
-      <td style={{ padding: "10px 8px" }}>
-        <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: `${ATS_COLORS[job.ats] || "#555"}22`, color: ATS_COLORS[job.ats] || "#555", textTransform: "uppercase", fontWeight: 600 }}>
-          {job.ats}
-        </span>
-      </td>
-      <td style={{ padding: "10px 8px", fontSize: 10, color: "#555" }}>{job.date_found}</td>
-      <td style={{ padding: "10px 8px" }}>
-        {greyed ? (
-          <span style={{ fontSize: 10, color: "#555" }}>Applied {job.date_applied ? formatDate(job.date_applied) : ""}</span>
-        ) : (
-          <button onClick={() => handleApply(job.id)} disabled={applying === job.id}
-            style={{ background: applying === job.id ? "#333" : "#8b5cf6", color: "#fff", border: "none", padding: "4px 12px", borderRadius: 4, fontSize: 10, cursor: "pointer", fontWeight: 600 }}>
-            {applying === job.id ? "..." : "Apply"}
-          </button>
-        )}
-      </td>
-    </tr>
-  );
+  const subtitle = useMemo(() => {
+    if (searchProfile.titles.length === 0) return "Dynamic role search profile";
+    const preview = searchProfile.titles.slice(0, 3).join(" / ");
+    return searchProfile.titles.length > 3
+      ? `${preview} +${searchProfile.titles.length - 3} more`
+      : preview;
+  }, [searchProfile]);
+
+  const JobRow = ({ job, greyed = false }) => {
+    const matchColor = getMatchColor(job.match_score ?? 0);
+
+    return (
+      <tr style={{ opacity: greyed ? 0.4 : 1, borderBottom: "1px solid #1a1a22" }}>
+        <td style={{ padding: "10px 12px", fontSize: 12, maxWidth: 280 }}>
+          <a
+            href={job.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: greyed ? "#555" : "#c4b5fd", textDecoration: "none" }}
+          >
+            {job.title || "Untitled"}
+          </a>
+        </td>
+        <td style={{ padding: "10px 8px", fontSize: 12, color: greyed ? "#444" : "#e0e0e5" }}>
+          {job.company || "—"}
+        </td>
+        <td style={{ padding: "10px 8px", fontSize: 11, color: greyed ? "#444" : "#888" }}>
+          {job.location || "—"}
+        </td>
+        <td style={{ padding: "10px 8px", fontSize: 11, color: job.salary ? (greyed ? "#444" : "#10b981") : "#333" }}>
+          {job.salary || "—"}
+        </td>
+        <td style={{ padding: "10px 8px" }}>
+          <span
+            title={job.match_summary || "Local score from title, summary, and qualifications"}
+            style={{
+              fontSize: 9,
+              padding: "2px 6px",
+              borderRadius: 4,
+              background: `${matchColor}22`,
+              color: matchColor,
+              textTransform: "uppercase",
+              fontWeight: 700,
+            }}
+          >
+            {job.match_score ?? "—"}/10
+          </span>
+        </td>
+        <td style={{ padding: "10px 8px" }}>
+          <span
+            style={{
+              fontSize: 9,
+              padding: "2px 6px",
+              borderRadius: 4,
+              background: `${ATS_COLORS[job.ats] || "#555"}22`,
+              color: ATS_COLORS[job.ats] || "#555",
+              textTransform: "uppercase",
+              fontWeight: 600,
+            }}
+          >
+            {job.ats}
+          </span>
+        </td>
+        <td style={{ padding: "10px 8px", fontSize: 10, color: "#555" }}>{job.date_found}</td>
+        <td style={{ padding: "10px 8px" }}>
+          {greyed ? (
+            <span style={{ fontSize: 10, color: "#555" }}>
+              Applied {job.date_applied ? formatDate(job.date_applied) : ""}
+            </span>
+          ) : (
+            <button
+              onClick={() => handleApply(job.id)}
+              disabled={applying === job.id}
+              style={{
+                background: applying === job.id ? "#333" : "#8b5cf6",
+                color: "#fff",
+                border: "none",
+                padding: "4px 12px",
+                borderRadius: 4,
+                fontSize: 10,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              {applying === job.id ? "..." : "Apply"}
+            </button>
+          )}
+        </td>
+      </tr>
+    );
+  };
 
   const JobTable = ({ jobs, greyed = false }) => (
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr style={{ borderBottom: "1px solid #222" }}>
-          {["Title", "Company", "Location", "Salary", "ATS", "Found", ""].map(h => (
-            <th key={h} style={{ padding: "8px 12px", fontSize: 9, color: "#555", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: "left", fontWeight: 600 }}>{h}</th>
+          {["Title", "Company", "Location", "Salary", "Match", "ATS", "Found", ""].map((heading) => (
+            <th
+              key={heading}
+              style={{
+                padding: "8px 12px",
+                fontSize: 9,
+                color: "#555",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+                textAlign: "left",
+                fontWeight: 600,
+              }}
+            >
+              {heading}
+            </th>
           ))}
         </tr>
       </thead>
       <tbody>
-        {jobs.map(j => <JobRow key={j.id} job={j} greyed={greyed} />)}
+        {jobs.map((job) => (
+          <JobRow key={job.id} job={job} greyed={greyed} />
+        ))}
       </tbody>
     </table>
   );
@@ -146,7 +445,9 @@ export default function JobCommandCenter() {
   const SectionHeader = ({ title, count, color = "#8b5cf6" }) => (
     <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "20px 0 8px", padding: "0 4px" }}>
       <div style={{ width: 3, height: 16, background: color, borderRadius: 2 }} />
-      <span style={{ fontSize: 12, fontWeight: 600, color: "#e0e0e5", fontFamily: "'Space Grotesk', sans-serif" }}>{title}</span>
+      <span style={{ fontSize: 12, fontWeight: 600, color: "#e0e0e5", fontFamily: "'Space Grotesk', sans-serif" }}>
+        {title}
+      </span>
       <span style={{ fontSize: 11, color: "#555" }}>({count})</span>
     </div>
   );
@@ -162,21 +463,49 @@ export default function JobCommandCenter() {
         tr:hover { background: #111118 !important; }
       `}</style>
 
-      {/* HEADER */}
       <div style={{ background: "linear-gradient(135deg, #0d0d15 0%, #1a0d2e 100%)", borderBottom: "1px solid #222", padding: "16px 24px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", maxWidth: 1400, margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", maxWidth: 1400, margin: "0 auto", gap: 16, flexWrap: "wrap" }}>
           <div>
             <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, color: "#fff", letterSpacing: "-0.5px" }}>
               <span style={{ color: "#8b5cf6" }}>&#9889;</span> JOB COMMAND CENTER
             </h1>
-            <p style={{ fontSize: 10, color: "#555", marginTop: 2 }}>FDE / AI Deployment / Applied AI</p>
+            <p style={{ fontSize: 10, color: "#666", marginTop: 4 }}>{subtitle}</p>
           </div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ fontSize: 10, color: "#444", marginRight: 8 }}>
               Last scraped: {formatDate(data.last_scraped)}
             </span>
-            <button onClick={() => handleScrape(false)} disabled={scraping}
-              style={{ background: scraping ? "#333" : "#10b981", color: "#fff", border: "none", padding: "6px 14px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600 }}>
+            <button
+              onClick={() => handleScrape(true)}
+              disabled={scraping}
+              style={{
+                background: "#1f2937",
+                color: "#d1d5db",
+                border: "1px solid #374151",
+                padding: "6px 12px",
+                borderRadius: 6,
+                fontSize: 11,
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              Quick Scrape
+            </button>
+            <button
+              onClick={() => handleScrape(false)}
+              disabled={scraping}
+              style={{
+                background: scraping ? "#333" : "#10b981",
+                color: "#fff",
+                border: "none",
+                padding: "6px 14px",
+                borderRadius: 6,
+                fontSize: 11,
+                cursor: "pointer",
+                fontFamily: "'Space Grotesk', sans-serif",
+                fontWeight: 600,
+              }}
+            >
               {scraping ? "Scraping..." : "Scrape Now"}
             </button>
           </div>
@@ -184,15 +513,129 @@ export default function JobCommandCenter() {
       </div>
 
       <div style={{ maxWidth: 1400, margin: "0 auto", padding: "12px 24px" }}>
-        {/* STATUS MESSAGE */}
         {statusMsg && (
-          <div style={{ background: "#111118", border: "1px solid #333", borderRadius: 6, padding: "8px 14px", marginBottom: 12, fontSize: 11, color: "#888", display: "flex", justifyContent: "space-between" }}>
+          <div style={{ background: "#111118", border: "1px solid #333", borderRadius: 6, padding: "8px 14px", marginBottom: 12, fontSize: 11, color: "#888", display: "flex", justifyContent: "space-between", gap: 8 }}>
             <span>{statusMsg}</span>
-            <button onClick={() => setStatusMsg("")} style={{ background: "none", border: "none", color: "#555", cursor: "pointer", fontSize: 11 }}>x</button>
+            <button onClick={() => setStatusMsg("")} style={{ background: "none", border: "none", color: "#555", cursor: "pointer", fontSize: 11 }}>
+              x
+            </button>
           </div>
         )}
 
-        {/* STATS BAR */}
+        <div style={{ background: "#111118", border: "1px solid #1a1a22", borderRadius: 10, padding: 14, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#f3f4f6", marginBottom: 4, fontFamily: "'Space Grotesk', sans-serif" }}>
+                Search Profile
+              </div>
+              <div style={{ fontSize: 10, color: "#666" }}>
+                Target roles drive scraping queries. Qualification keywords drive the local 0–10 match score from cleaned job text.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[
+                { label: "Titles", value: searchProfile.titles.length, color: "#8b5cf6" },
+                { label: "Keywords", value: searchProfile.qualificationKeywords.length, color: "#10b981" },
+                { label: "Batches", value: profileStats?.titleBatches || 0, color: "#f59e0b" },
+                { label: "Queries", value: profileStats?.totalQueries || 0, color: "#3b82f6" },
+              ].map((item) => (
+                <div key={item.label} style={{ background: "#0a0a10", border: "1px solid #1a1a22", borderRadius: 8, padding: "8px 10px", minWidth: 80 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: item.color, fontFamily: "'Space Grotesk', sans-serif" }}>
+                    {item.value}
+                  </div>
+                  <div style={{ fontSize: 8, color: "#555", textTransform: "uppercase", letterSpacing: "0.5px", marginTop: 2 }}>
+                    {item.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gap: 14 }}>
+            <ChipEditor
+              label="Target Role Titles"
+              items={searchProfile.titles}
+              inputValue={titleInput}
+              onInputChange={setTitleInput}
+              onAdd={() => {
+                setSearchProfile((current) => ({
+                  ...current,
+                  titles: addUniqueItem(current.titles, titleInput),
+                }));
+                setTitleInput("");
+              }}
+              onRemove={(index) =>
+                setSearchProfile((current) => ({
+                  ...current,
+                  titles: removeItem(current.titles, index),
+                }))
+              }
+              placeholder='Type a role title and press Enter, for example "solutions architect AI"'
+              helpText="These titles are chunked into scrape queries. Add broad variants you actually want to search."
+            />
+
+            <ChipEditor
+              label="Qualification Keywords"
+              items={searchProfile.qualificationKeywords}
+              inputValue={keywordInput}
+              onInputChange={setKeywordInput}
+              onAdd={() => {
+                setSearchProfile((current) => ({
+                  ...current,
+                  qualificationKeywords: addUniqueItem(current.qualificationKeywords, keywordInput),
+                }));
+                setKeywordInput("");
+              }}
+              onRemove={(index) =>
+                setSearchProfile((current) => ({
+                  ...current,
+                  qualificationKeywords: removeItem(current.qualificationKeywords, index),
+                }))
+              }
+              placeholder='Type a keyword and press Enter, for example "enterprise ai"'
+              helpText="These are matched against cleaned job summaries and qualification sections, not raw HTML."
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+            <button
+              onClick={handleSaveProfile}
+              disabled={profileSaving || !profileDirty}
+              style={{
+                background: profileSaving || !profileDirty ? "#333" : "#8b5cf6",
+                color: "#fff",
+                border: "none",
+                padding: "8px 14px",
+                borderRadius: 6,
+                fontSize: 11,
+                cursor: profileSaving || !profileDirty ? "default" : "pointer",
+                fontWeight: 600,
+              }}
+            >
+              {profileSaving ? "Saving..." : "Save Search Profile"}
+            </button>
+            <button
+              onClick={() => setSearchProfile(defaultProfile)}
+              style={{
+                background: "#0a0a10",
+                color: "#aaa",
+                border: "1px solid #2b2b3a",
+                padding: "8px 12px",
+                borderRadius: 6,
+                fontSize: 11,
+                cursor: "pointer",
+              }}
+            >
+              Reset Defaults
+            </button>
+            {profileDirty && (
+              <span style={{ fontSize: 10, color: "#888", alignSelf: "center" }}>
+                Unsaved changes. Save before rescoring the board or running a scrape with the new profile.
+              </span>
+            )}
+          </div>
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8, marginBottom: 12 }}>
           {[
             { label: "Total", val: data.total, color: "#8b5cf6" },
@@ -200,42 +643,76 @@ export default function JobCommandCenter() {
             { label: "Previously Seen", val: data.previouslySeen?.length || 0, color: "#f59e0b" },
             { label: "Applied", val: data.applied?.length || 0, color: "#3b82f6" },
             { label: "Partial Data", val: data.scrape_stats?.detail_fetch_failed || 0, color: "#f59e0b" },
-          ].map(s => (
-            <div key={s.label} style={{ background: "#111118", border: "1px solid #1a1a22", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: s.color, fontFamily: "'Space Grotesk', sans-serif" }}>{s.val}</div>
-              <div style={{ fontSize: 8, color: "#555", textTransform: "uppercase", letterSpacing: "0.5px", marginTop: 2 }}>{s.label}</div>
+          ].map((stat) => (
+            <div key={stat.label} style={{ background: "#111118", border: "1px solid #1a1a22", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: stat.color, fontFamily: "'Space Grotesk', sans-serif" }}>
+                {stat.val}
+              </div>
+              <div style={{ fontSize: 8, color: "#555", textTransform: "uppercase", letterSpacing: "0.5px", marginTop: 2 }}>
+                {stat.label}
+              </div>
             </div>
           ))}
         </div>
 
-        {/* SCRAPE ERRORS BANNER — only show real failures, not zero-result queries */}
-        {data.scrape_errors?.filter(e => e.error !== "no results").length > 0 && (
+        {data.scrape_errors?.length > 0 && (
           <div style={{ background: "#1a1111", border: "1px solid #3a1515", borderRadius: 6, padding: "6px 12px", marginBottom: 12, fontSize: 10, color: "#ef4444" }}>
-            Scrape issues: {data.scrape_errors.filter(e => e.error !== "no results").map(e => e.source).filter((v, i, a) => a.indexOf(v) === i).join(", ")}
+            Scrape issues: {data.scrape_errors.map((error) => error.source).filter((value, index, array) => array.indexOf(value) === index).join(", ")}
           </div>
         )}
 
-        {/* FILTERS + APPLY ALL */}
         <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
-          <input placeholder="Search titles, companies, locations..." value={search} onChange={e => setSearch(e.target.value)}
-            style={{ flex: 1, minWidth: 200, background: "#111118", border: "1px solid #222", borderRadius: 6, padding: "8px 12px", color: "#e0e0e5", fontSize: 12 }} />
-          <select value={filterATS} onChange={e => setFilterATS(e.target.value)}
-            style={{ background: "#111118", border: "1px solid #222", borderRadius: 6, padding: "8px", color: "#e0e0e5", fontSize: 11 }}>
+          <input
+            placeholder="Search titles, companies, locations..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            style={{ flex: 1, minWidth: 200, background: "#111118", border: "1px solid #222", borderRadius: 6, padding: "8px 12px", color: "#e0e0e5", fontSize: 12 }}
+          />
+          <select
+            value={filterATS}
+            onChange={(event) => setFilterATS(event.target.value)}
+            style={{ background: "#111118", border: "1px solid #222", borderRadius: 6, padding: "8px", color: "#e0e0e5", fontSize: 11 }}
+          >
             <option value="all">All ATS</option>
-            {allATS.map(a => <option key={a} value={a}>{a}</option>)}
+            {allATS.map((ats) => (
+              <option key={ats} value={ats}>{ats}</option>
+            ))}
+          </select>
+          <select
+            value={minMatch}
+            onChange={(event) => setMinMatch(event.target.value)}
+            style={{ background: "#111118", border: "1px solid #222", borderRadius: 6, padding: "8px", color: "#e0e0e5", fontSize: 11 }}
+          >
+            <option value="all">All Matches</option>
+            <option value="8">8+/10</option>
+            <option value="6">6+/10</option>
+            <option value="4">4+/10</option>
           </select>
           {(data.newToday?.length > 0 || data.previouslySeen?.length > 0) && (
-            <button onClick={handleApplyAllNew}
-              style={{ background: "#7c3aed", color: "#fff", border: "none", padding: "8px 16px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600 }}>
-              Apply All New ({(data.newToday?.length || 0) + (data.previouslySeen?.length || 0)})
-            </button>
+            <>
+              <input
+                type="number"
+                min="1"
+                max="50"
+                inputMode="numeric"
+                value={batchLimit}
+                onChange={(event) => setBatchLimit(event.target.value)}
+                aria-label="Batch apply limit"
+                style={{ width: 84, background: "#111118", border: "1px solid #222", borderRadius: 6, padding: "8px 10px", color: "#e0e0e5", fontSize: 11 }}
+              />
+              <button
+                onClick={handleApplyAllNew}
+                style={{ background: "#7c3aed", color: "#fff", border: "none", padding: "8px 16px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600 }}
+              >
+                Apply Pending ({(data.newToday?.length || 0) + (data.previouslySeen?.length || 0)})
+              </button>
+            </>
           )}
           <button onClick={fetchJobs} style={{ background: "#222", color: "#888", border: "1px solid #333", padding: "8px 12px", borderRadius: 6, fontSize: 11, cursor: "pointer" }}>
             Refresh
           </button>
         </div>
 
-        {/* NEW TODAY */}
         {filterJobs(data.newToday || []).length > 0 && (
           <>
             <SectionHeader title="New Today" count={filterJobs(data.newToday).length} color="#10b981" />
@@ -245,7 +722,6 @@ export default function JobCommandCenter() {
           </>
         )}
 
-        {/* PREVIOUSLY SEEN */}
         {filterJobs(data.previouslySeen || []).length > 0 && (
           <>
             <SectionHeader title="Previously Seen" count={filterJobs(data.previouslySeen).length} color="#f59e0b" />
@@ -255,7 +731,6 @@ export default function JobCommandCenter() {
           </>
         )}
 
-        {/* APPLIED (greyed out) */}
         {filterJobs(data.applied || []).length > 0 && (
           <>
             <SectionHeader title="Applied" count={filterJobs(data.applied).length} color="#3b82f6" />
@@ -265,12 +740,15 @@ export default function JobCommandCenter() {
           </>
         )}
 
-        {/* EMPTY STATE */}
         {data.total === 0 && (
           <div style={{ textAlign: "center", padding: "60px 20px", color: "#444" }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}>&#128269;</div>
-            <div style={{ fontSize: 14, fontFamily: "'Space Grotesk', sans-serif", marginBottom: 8 }}>No jobs yet</div>
-            <div style={{ fontSize: 11, color: "#333" }}>Click "Scrape Now" to search for jobs across ATS platforms and job boards.</div>
+            <div style={{ fontSize: 14, fontFamily: "'Space Grotesk', sans-serif", marginBottom: 8 }}>
+              No jobs yet
+            </div>
+            <div style={{ fontSize: 11, color: "#333" }}>
+              Save a search profile, then click "Scrape Now" to search across ATS platforms and job boards.
+            </div>
           </div>
         )}
       </div>

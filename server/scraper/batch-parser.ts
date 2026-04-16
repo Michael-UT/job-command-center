@@ -3,7 +3,9 @@
 // Falls back to single-request parsing if batch is unavailable.
 
 import { config } from "dotenv";
+import { z } from "zod";
 import { PARSE_SYSTEM_PROMPT, PARSE_FEW_SHOT_EXAMPLES } from "../agents/prompts/scrape-parse.js";
+import { extractJobMatchContext } from "../matching/context.js";
 
 // Load .env for ANTHROPIC_API_KEY
 config();
@@ -42,6 +44,177 @@ export interface ParsedJob {
   parse_fail_reason: string | null;
 }
 
+const PARSE_INPUT_CHAR_LIMIT = 6500;
+const META_CHAR_LIMIT = 1200;
+const STRUCTURED_DATA_CHAR_LIMIT = 2200;
+const PAGE_TEXT_CHAR_LIMIT = 2800;
+const MATCH_CONTEXT_CHAR_LIMIT = 1800;
+const PARSE_MODEL = process.env.PARSE_MODEL || "claude-sonnet-4-6";
+
+const ParsedJobSchema = z.object({
+  is_job_posting: z.boolean(),
+  title: z.string().trim().max(200).nullable(),
+  company: z.string().trim().max(160).nullable(),
+  location: z.string().trim().max(200).nullable(),
+  salary: z.string().trim().max(80).nullable(),
+  seniority: z.enum(["intern", "entry", "mid", "senior", "lead", "staff"]).nullable(),
+  employment_type: z.enum(["full-time", "part-time", "contract"]).nullable(),
+  status: z.enum(["open", "closed"]).nullable(),
+  parse_failed: z.boolean(),
+  parse_fail_reason: z.string().trim().max(240).nullable(),
+});
+
+type JsonLdNode = Record<string, unknown>;
+
+function flattenJsonLdNodes(value: unknown): JsonLdNode[] {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.flatMap(flattenJsonLdNodes);
+  }
+  if (typeof value !== "object") return [];
+
+  const node = value as JsonLdNode;
+  const nested = Array.isArray(node["@graph"])
+    ? node["@graph"].flatMap(flattenJsonLdNodes)
+    : [];
+
+  return [node, ...nested];
+}
+
+function hasJobPostingType(node: JsonLdNode): boolean {
+  const type = node["@type"];
+  if (Array.isArray(type)) return type.includes("JobPosting");
+  return type === "JobPosting";
+}
+
+function formatCompensation(value: number, isAnnual: boolean): string {
+  if (isAnnual && value >= 1000) {
+    return `$${Math.round(value / 1000)}k`;
+  }
+  return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
+}
+
+function extractSalary(data: JsonLdNode): string | null {
+  const salaryInfo =
+    typeof data.baseSalary === "object" && data.baseSalary
+      ? (data.baseSalary as JsonLdNode)
+      : null;
+  const salaryValue =
+    typeof salaryInfo?.value === "object" && salaryInfo.value
+      ? (salaryInfo.value as JsonLdNode)
+      : salaryInfo;
+
+  if (!salaryValue) return null;
+
+  const min = Number(salaryValue.minValue ?? salaryValue.value ?? salaryValue["value"]);
+  const max = Number(salaryValue.maxValue ?? salaryValue.value ?? salaryValue["value"]);
+  const unitText = String(
+    salaryValue.unitText ?? salaryInfo?.unitText ?? "",
+  ).toLowerCase();
+  const isAnnual =
+    unitText === "" || unitText.includes("year") || unitText.includes("annual");
+  const suffix = unitText.includes("hour") ? "/hr" : "";
+
+  if (!Number.isFinite(min) || min <= 0 || min >= 10000000) return null;
+
+  if (Number.isFinite(max) && max > 0 && max < 10000000 && max !== min) {
+    return `${formatCompensation(min, isAnnual)}-${formatCompensation(max, isAnnual)}${suffix}`;
+  }
+
+  return `${formatCompensation(min, isAnnual)}${suffix}`;
+}
+
+function extractLocationPart(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value === "string") return value;
+  if (typeof value !== "object") return null;
+
+  const node = value as JsonLdNode;
+  const country =
+    typeof node.addressCountry === "string"
+      ? node.addressCountry
+      : typeof node.addressCountry === "object" && node.addressCountry
+        ? String((node.addressCountry as JsonLdNode).name ?? "")
+        : null;
+
+  return [
+    node.addressLocality,
+    node.addressRegion,
+    country && !["US", "USA", "United States"].includes(country) ? country : null,
+  ]
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join(", ") || null;
+}
+
+function extractLocation(data: JsonLdNode): string | null {
+  const rawLocations = Array.isArray(data.jobLocation)
+    ? data.jobLocation
+    : data.jobLocation
+      ? [data.jobLocation]
+      : [];
+
+  const locations = rawLocations
+    .map((entry) => {
+      if (typeof entry === "object" && entry) {
+        return extractLocationPart((entry as JsonLdNode).address ?? entry);
+      }
+      return extractLocationPart(entry);
+    })
+    .filter((value): value is string => Boolean(value));
+
+  const uniqueLocations = [...new Set(locations)];
+  const baseLocation = uniqueLocations.length > 0 ? uniqueLocations.join(" / ") : null;
+
+  if (data.jobLocationType === "TELECOMMUTE") {
+    return baseLocation ? `${baseLocation} / Remote` : "Remote";
+  }
+
+  return baseLocation;
+}
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength).trim()}\n[...truncated]`;
+}
+
+function extractJsonObject(text: string): string {
+  const trimmed = text.trim();
+  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fencedMatch) return fencedMatch[1].trim();
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return trimmed.slice(firstBrace, lastBrace + 1);
+  }
+
+  return trimmed;
+}
+
+function parseModelOutput(rawText: string): z.infer<typeof ParsedJobSchema> {
+  const extracted = extractJsonObject(rawText);
+  const parsed = JSON.parse(extracted);
+  return ParsedJobSchema.parse(parsed);
+}
+
+function buildParseFailure(page: RawPage, reason: string): ParsedJob {
+  return {
+    url: page.url,
+    ats: page.ats,
+    source: page.source,
+    is_job_posting: false,
+    title: null,
+    company: null,
+    location: null,
+    salary: null,
+    seniority: null,
+    employment_type: null,
+    status: null,
+    parse_failed: true,
+    parse_fail_reason: reason,
+  };
+}
+
 // Extract useful content from HTML for parsing.
 // Handles both server-rendered pages and JS-heavy SPAs (Ashby, etc.)
 function cleanHtml(html: string): string {
@@ -65,7 +238,7 @@ function cleanHtml(html: string): string {
   const pageTitle = titleMatch ? `Page title: ${titleMatch[1]}` : "";
 
   // Strip scripts, styles, nav, footer for visible text
-  let visibleText = html
+  const visibleText = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<nav[\s\S]*?<\/nav>/gi, "")
@@ -75,66 +248,63 @@ function cleanHtml(html: string): string {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Build the content to send to Claude, prioritizing structured data
-  let cleaned = "";
-  if (pageTitle) cleaned += pageTitle + "\n";
-  if (metaTags.length > 0) cleaned += "Meta: " + metaTags.join(" | ") + "\n";
-  if (jsonLd) cleaned += "Structured data: " + jsonLd + "\n";
-  cleaned += "Page text: " + visibleText;
+  const matchContext = extractJobMatchContext(html);
+  const sections = [
+    pageTitle ? pageTitle : null,
+    metaTags.length > 0 ? `Meta: ${truncate(metaTags.join(" | "), META_CHAR_LIMIT)}` : null,
+    jsonLd ? `Structured data: ${truncate(jsonLd, STRUCTURED_DATA_CHAR_LIMIT)}` : null,
+    matchContext.relevantText
+      ? `Relevant text: ${truncate(matchContext.relevantText, MATCH_CONTEXT_CHAR_LIMIT)}`
+      : null,
+    visibleText ? `Page text: ${truncate(visibleText, PAGE_TEXT_CHAR_LIMIT)}` : null,
+  ].filter(Boolean);
 
-  if (cleaned.length > 8000) {
-    cleaned = cleaned.slice(0, 8000) + "\n[...truncated]";
-  }
-  return cleaned;
+  return truncate(sections.join("\n\n"), PARSE_INPUT_CHAR_LIMIT);
 }
 
 // Try to extract job data directly from JSON-LD (skip Claude API call if possible)
 function tryJsonLd(html: string): ParsedJob | null {
-  try {
-    const match = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
-    if (!match) return null;
+  const matches = html.matchAll(
+    /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
+  );
 
-    const data = JSON.parse(match[1]);
-    if (data["@type"] !== "JobPosting") return null;
+  for (const match of matches) {
+    try {
+      const data = JSON.parse(match[1]);
+      const jobPosting = flattenJsonLdNodes(data).find(hasJobPostingType);
+      if (!jobPosting) continue;
 
-    // Parse salary, handling missing/invalid values
-    let salary: string | null = null;
-    const salaryVal = data.baseSalary?.value;
-    if (salaryVal) {
-      const min = Number(salaryVal.minValue);
-      const max = Number(salaryVal.maxValue);
-      if (!isNaN(min) && !isNaN(max) && min > 0 && max > 0 && max < 10000000) {
-        // Convert to $XXXk format if > 1000, otherwise keep as-is
-        const fmtMin = min >= 1000 ? `$${Math.round(min / 1000)}k` : `$${min}`;
-        const fmtMax = max >= 1000 ? `$${Math.round(max / 1000)}k` : `$${max}`;
-        salary = `${fmtMin}-${fmtMax}`;
-      }
+      return {
+        url: "",
+        ats: "",
+        source: "",
+        is_job_posting: true,
+        title: typeof jobPosting.title === "string" ? jobPosting.title : null,
+        company:
+          typeof jobPosting.hiringOrganization === "object" && jobPosting.hiringOrganization
+            ? String((jobPosting.hiringOrganization as JsonLdNode).name ?? "")
+            : null,
+        location: extractLocation(jobPosting),
+        salary: extractSalary(jobPosting),
+        seniority: null,
+        employment_type:
+          jobPosting.employmentType === "FULL_TIME"
+            ? "full-time"
+            : jobPosting.employmentType === "PART_TIME"
+              ? "part-time"
+              : jobPosting.employmentType === "CONTRACTOR"
+                ? "contract"
+                : null,
+        status: "open",
+        parse_failed: false,
+        parse_fail_reason: null,
+      };
+    } catch {
+      continue;
     }
-
-    const location = data.jobLocation?.address
-      ? [data.jobLocation.address.addressLocality, data.jobLocation.address.addressRegion]
-          .filter(Boolean).join(", ")
-      : null;
-
-    return {
-      url: "", ats: "", source: "",
-      is_job_posting: true,
-      title: data.title || null,
-      company: data.hiringOrganization?.name || null,
-      location: (data.jobLocationType === "TELECOMMUTE" && location)
-        ? `${location} / Remote` : (location || (data.jobLocationType === "TELECOMMUTE" ? "Remote" : null)),
-      salary,
-      seniority: null,
-      employment_type: data.employmentType === "FULL_TIME" ? "full-time"
-        : data.employmentType === "PART_TIME" ? "part-time"
-        : data.employmentType === "CONTRACTOR" ? "contract" : null,
-      status: "open",
-      parse_failed: false,
-      parse_fail_reason: null,
-    };
-  } catch {
-    return null;
   }
+
+  return null;
 }
 
 // Try Greenhouse JSON API: boards-api.greenhouse.io/v1/boards/{company}/jobs/{id}
@@ -327,8 +497,9 @@ export async function parseSinglePage(page: RawPage): Promise<ParsedJob> {
   try {
     const anthropic = await getClient();
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6-20250514",
+      model: PARSE_MODEL,
       max_tokens: 400,
+      temperature: 0,
       system: PARSE_SYSTEM_PROMPT,
       messages: [
         ...PARSE_FEW_SHOT_EXAMPLES,
@@ -338,7 +509,7 @@ export async function parseSinglePage(page: RawPage): Promise<ParsedJob> {
 
     const text =
       response.content[0].type === "text" ? response.content[0].text : "";
-    const parsed = JSON.parse(text);
+    const parsed = parseModelOutput(text);
 
     return {
       url: page.url,
@@ -347,21 +518,10 @@ export async function parseSinglePage(page: RawPage): Promise<ParsedJob> {
       ...parsed,
     };
   } catch (e) {
-    return {
-      url: page.url,
-      ats: page.ats,
-      source: page.source,
-      is_job_posting: false,
-      title: null,
-      company: null,
-      location: null,
-      salary: null,
-      seniority: null,
-      employment_type: null,
-      status: null,
-      parse_failed: true,
-      parse_fail_reason: `parse_error: ${e instanceof Error ? e.message : String(e)}`,
-    };
+    return buildParseFailure(
+      page,
+      `parse_error: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 }
 
@@ -382,8 +542,9 @@ export async function batchParsePages(pages: RawPage[]): Promise<ParsedJob[]> {
   const requests = pages.map((page, i) => ({
     custom_id: `job-${i}`,
     params: {
-      model: "claude-sonnet-4-6-20250514" as const,
+      model: PARSE_MODEL,
       max_tokens: 400,
+      temperature: 0,
       system: PARSE_SYSTEM_PROMPT,
       messages: [
         ...PARSE_FEW_SHOT_EXAMPLES,
@@ -429,41 +590,18 @@ export async function batchParsePages(pages: RawPage[]): Promise<ParsedJob[]> {
           const msg = entry.result.message;
           const text =
             msg.content[0].type === "text" ? msg.content[0].text : "";
-          const data = JSON.parse(text);
+          const data = parseModelOutput(text);
           parsed.push({ url: page.url, ats: page.ats, source: page.source, ...data });
-        } catch {
-          parsed.push({
-            url: page.url,
-            ats: page.ats,
-            source: page.source,
-            is_job_posting: false,
-            title: null,
-            company: null,
-            location: null,
-            salary: null,
-            seniority: null,
-            employment_type: null,
-            status: null,
-            parse_failed: true,
-            parse_fail_reason: "batch_result_parse_error",
-          });
+        } catch (e) {
+          parsed.push(
+            buildParseFailure(
+              page,
+              `batch_result_parse_error: ${e instanceof Error ? e.message : String(e)}`,
+            ),
+          );
         }
       } else {
-        parsed.push({
-          url: page.url,
-          ats: page.ats,
-          source: page.source,
-          is_job_posting: false,
-          title: null,
-          company: null,
-          location: null,
-          salary: null,
-          seniority: null,
-          employment_type: null,
-          status: null,
-          parse_failed: true,
-          parse_fail_reason: `batch_error: ${entry.result.type}`,
-        });
+        parsed.push(buildParseFailure(page, `batch_error: ${entry.result.type}`));
       }
     }
 

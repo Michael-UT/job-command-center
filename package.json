@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Job search tracker and auto-apply agent for FDE / AI Deployment roles",
+  "description": "Job search tracker and supervised auto-apply agent with configurable role search profiles",
   "scripts": {
     "dev": "concurrently \"vite\" \"tsx watch server/index.ts\"",
     "dev:frontend": "vite",
@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "scrape": "tsx server/agents/scrape-agent.ts",
     "apply": "tsx server/agents/apply-agent.ts",
-    "apply:batch": "tsx server/agents/apply-agent.ts --batch"
+    "apply:batch": "tsx server/agents/apply-agent.ts --batch",
+    "tokenizer": "tsx scripts/tokenizer-playground.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "latest",

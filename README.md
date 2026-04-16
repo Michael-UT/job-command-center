@@ -1,107 +1,68 @@
-# ⚡ Job Command Center
+# Job Command Center
 
-Job search tracker + auto-apply agent for **Forward Deployed Engineer / AI Deployment / Applied AI** roles.
+Job Command Center is a React + Express workspace for finding jobs across a configurable set of target roles, storing them locally, and launching a supervised apply agent when you are ready to work through forms.
 
-## What's Inside
+The repo has four core pieces:
 
-### 🌐 Web App (`src/`)
-A React job board with:
-- **Tracker** — 35+ pre-loaded target companies across 4 tiers, with fit scores, status tracking, and notes
-- **Search URLs** — 150+ pre-generated clickable Google `site:` searches across Ashby, Greenhouse, Lever, Workday, and 8 job boards, using 25 title variants
-- **Scraper Info** — setup instructions and coverage stats
-
-All data persists in `localStorage`.
-
-### 🤖 Auto-Apply Agent (`auto_apply.py`)
-A Playwright-based agent that:
-1. Takes a job URL (Greenhouse, Ashby, or Lever)
-2. Opens a **visible** browser window
-3. Detects the ATS platform
-4. Pre-fills: name, email, phone, LinkedIn, GitHub, website, current company, location, work authorization
-5. Uploads your resume PDF
-6. **Pauses for your review** — you fill in custom questions manually, then confirm
-
-Supports single URL, interactive mode, and batch mode from a file.
+- `src/` renders the dashboard for scraped jobs and apply controls.
+- `server/index.ts` serves the API used by the frontend.
+- `server/agents/scrape-agent.ts` searches the web via Serper, parses job pages, and writes results to `server/data/jobs.json`.
+- `server/agents/apply-agent.ts` runs the interactive application flow with Playwright MCP and custom profile/apply tools.
 
 ## Setup
 
-### Web App
 ```bash
 npm install
-npm run dev
+cp .env.example .env
+cp profile.example.yaml profile.yaml
 ```
 
-Deploy to GitHub Pages:
+Then:
+
+- Add `SERPER_API_KEY` and `ANTHROPIC_API_KEY` to `.env`
+- Fill out `profile.yaml`
+- Place your resume at `./resume.pdf`, or set `resume_path` in `profile.yaml`
+
+## Commands
+
 ```bash
-npm run build
-# push dist/ to gh-pages branch
+npm run dev          # Vite frontend + Express API
+npm run dev:frontend # frontend only
+npm run dev:server   # backend only
+npm run scrape       # CLI scrape run
+npm run apply        # CLI apply agent
+npm run apply:batch  # CLI batch apply mode
+npm run tokenizer    # local prompt/token playground, no API call
+npm run build        # production frontend build
 ```
 
-### Auto-Apply Agent
-```bash
-pip install playwright
-playwright install chromium
-```
+## Search Profile And Matching
 
-Edit `PROFILE` at the top of `auto_apply.py` with your info, then:
-```bash
-# Interactive mode
-python auto_apply.py
+- The dashboard lets you edit target role titles and qualification keywords directly.
+- Scraping queries are generated from the saved target titles.
+- Match scores are computed locally on a 0-10 scale from job title, cleaned summary text, and qualification text.
+- Raw HTML is not used for matching.
 
-# Single URL
-python auto_apply.py https://job-boards.greenhouse.io/anthropic/jobs/4985877008
+## Data Flow
 
-# Batch mode (reads urls.txt, pauses for review each time)
-python auto_apply.py --batch urls.txt
+1. The scraper generates a query matrix from `server/config/scrape-config.ts`.
+2. Serper returns candidate URLs.
+3. `server/scraper/batch-parser.ts` tries fast extractors first, then Anthropic parsing when needed.
+4. `server/scraper/dedup.ts` normalizes and persists jobs in `server/data/jobs.json`.
+5. The dashboard calls `/api/jobs`, `/api/scrape`, and apply endpoints from `src/App.jsx`.
+6. The apply agent loads `profile.yaml`, reads the resume, drives the browser, pauses for confirmation, and only then marks a job applied.
 
-# Batch mode, auto-submit (no pause — use carefully)
-python auto_apply.py --batch urls.txt --auto
-```
+## Important Files
 
-## Search Coverage
+- `server/config/scrape-config.ts`: search titles, sites, and ATS detection
+- `server/scraper/dedup.ts`: persistence, IDs, deduplication, grouped status views
+- `server/scraper/batch-parser.ts`: HTML cleanup plus parser/extractor logic
+- `server/tools/profile-tools.ts`: profile and resume MCP tools
+- `server/tools/apply-tools.ts`: mark-applied and application logging MCP tools
+- `src/App.jsx`: dashboard UI
 
-| Dimension | Count |
-|-----------|-------|
-| Title variants | 25 |
-| ATS platforms (Google `site:` search) | 6 |
-| Job boards | 8 |
-| Google `site:` queries | 150 |
-| LinkedIn queries | 25 |
-| Indeed queries | 10 |
-| **Total search URLs** | **185+** |
+## Safety Notes
 
-### Title Variants Searched
-- Forward Deployed Engineer
-- Forward Deployed AI Engineer
-- AI Deployment Engineer / Strategist
-- Applied AI Engineer
-- Solutions Engineer (AI / LLM / ML)
-- Solutions Architect (AI)
-- AI Consultant
-- AI Implementation Engineer
-- Customer Engineer (AI)
-- Technical Account Manager (AI / LLM)
-- AI Strategist
-- Professional Services Engineer (AI)
-- Field Engineer (AI)
-- AI Integration Engineer
-- Pre-Sales Engineer (AI)
-- Enterprise AI Engineer
-- And more...
-
-## Architecture
-
-```
-job-command-center/
-├── src/
-│   ├── App.jsx          # Main React app (tracker + search + scraper tabs)
-│   └── main.jsx         # Entry point
-├── auto_apply.py        # Playwright auto-apply agent
-├── index.html
-├── vite.config.js
-├── package.json
-└── README.md
-```
-
-## License
-MIT
+- Do not commit `.env`, `profile.yaml`, `resume.pdf`, or `server/data/jobs.json`
+- The apply flow is designed to pause before submission for human confirmation
+- Only one apply session should run at a time because it uses the shared terminal/browser

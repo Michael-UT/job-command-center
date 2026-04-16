@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { randomBytes } from "crypto";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -21,6 +21,8 @@ export interface Job {
   date_applied: string | null;
   status: "new" | "applied" | "skipped";
   scrape_detail_failed: boolean;
+  description_text?: string | null;
+  qualification_text?: string | null;
 }
 
 export interface JobsData {
@@ -44,6 +46,7 @@ export function loadJobs(): JobsData {
 }
 
 export function saveJobs(data: JobsData): void {
+  mkdirSync(dirname(JOBS_PATH), { recursive: true });
   writeFileSync(JOBS_PATH, JSON.stringify(data, null, 2));
 }
 

@@ -14,3 +14,7 @@ resume.pdf
 
 # Generated data
 server/data/jobs.json
+server/data/search-profile.json
+
+# Local docs / notes
+docs/STUDY_GUIDE.md
