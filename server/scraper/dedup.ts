@@ -123,6 +123,52 @@ function splitCompanyAt(company: string | null): string | null {
   return m ? m[2].trim() : company;
 }
 
+// Extract employer name from an ATS URL slug when parse-time company is missing.
+// e.g. https://jobs.lever.co/levelai/... → "Level AI" (with friendly map for known slugs).
+const URL_SLUG_NAMES: Record<string, string> = {
+  palantir: "Palantir", coupa: "Coupa Software", quantcast: "Quantcast",
+  gleanwork: "Glean", anthropic: "Anthropic", openai: "OpenAI",
+  scaleai: "Scale AI", xai: "xAI", labelbox: "Labelbox",
+  snorkelai: "Snorkel AI", cresta: "Cresta", icapitalnetwork: "iCapital",
+  axiomaticai: "Axiomatic AI", runpodai: "RunPod", levelai: "Level AI",
+  "field-ai": "Field AI", defenseunicorns: "Defense Unicorns",
+};
+
+function prettifyCompanySlug(slug: string): string {
+  const lower = slug.toLowerCase();
+  if (URL_SLUG_NAMES[lower]) return URL_SLUG_NAMES[lower];
+  return slug
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\b(Inc|Llc|Corp|Ltd)\b/gi, "")
+    .replace(/\bAi\b/g, "AI")
+    .replace(/\bMl\b/g, "ML")
+    .trim();
+}
+
+export function companyFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  // Rippling locale prefix: /en-US/{company}/... — skip the locale segment
+  const rippling = url.match(/ats\.rippling\.com\/([^/?#]+)(?:\/([^/?#]+))?/i);
+  if (rippling) {
+    const first = rippling[1];
+    const second = rippling[2];
+    const slug = /^[a-z]{2}-[A-Z]{2}$/.test(first) && second ? second : first;
+    if (slug && slug.toLowerCase() !== "jobs") return prettifyCompanySlug(slug);
+  }
+  const patterns = [
+    /jobs\.lever\.co\/([^/?#]+)/i,
+    /(?:job-boards|boards)\.greenhouse\.io\/([^/?#]+)/i,
+    /jobs\.ashbyhq\.com\/([^/?#]+)/i,
+    /boards-api\.greenhouse\.io\/v1\/boards\/([^/?#]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = url.match(re);
+    if (m) return prettifyCompanySlug(m[1]);
+  }
+  return null;
+}
+
 // Extract a US location hint from a URL slug when parse-time location is missing.
 // Runs on serper-sourced pages whose HTML didn't expose structured data.
 export function locationFromUrlSlug(url: string | null): string | null {
@@ -240,6 +286,10 @@ export function mergeNewJobs(
 
     // Clean title and extract company if missing
     const cleaned = cleanTitleAndCompany(job.title, job.company);
+    // Last-resort: recover company from ATS URL slug (Lever, Greenhouse, Rippling, Ashby)
+    if (!cleaned.company) {
+      cleaned.company = companyFromUrl(job.url);
+    }
 
     if (isCrossSiteDuplicate(existing.jobs, cleaned.title, cleaned.company)) continue;
 
