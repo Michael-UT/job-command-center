@@ -304,8 +304,18 @@ export default function JobCommandCenter() {
       <td style={{ padding: "10px 8px", textAlign: "center" }}><ScoreBadge score={job.score} /></td>
       <td style={{ padding: "10px 8px", fontSize: 11, color: "#888", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{job.location || "\u2014"}</td>
       <td style={{ padding: "10px 8px", fontSize: 11, color: job.salary ? "#10b981" : "#333", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{job.salary || "\u2014"}</td>
-      <td style={{ padding: "10px 8px" }}>
-        <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: `${ATS_COLORS[job.ats] || "#555"}22`, color: ATS_COLORS[job.ats] || "#555", textTransform: "uppercase", fontWeight: 600 }}>
+      <td style={{ padding: "10px 8px", overflow: "hidden", maxWidth: 0 }}>
+        <span
+          title={job.ats || ""}
+          style={{
+            fontSize: 9, padding: "2px 6px", borderRadius: 4,
+            background: `${ATS_COLORS[job.ats] || "#555"}22`,
+            color: ATS_COLORS[job.ats] || "#555",
+            textTransform: "uppercase", fontWeight: 600,
+            display: "inline-block", maxWidth: "100%",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            verticalAlign: "middle",
+          }}>
           {job.ats}
         </span>
       </td>
