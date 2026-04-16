@@ -34,6 +34,10 @@ function normalize(value: string | null | undefined): string {
     .trim();
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function tokenize(value: string): string[] {
   return normalize(value)
     .split(" ")
@@ -68,13 +72,19 @@ function scoreTitleSimilarity(jobTitle: string, roleTitle: string): number {
   return 0;
 }
 
+function containsNormalizedPhrase(text: string, phrase: string): boolean {
+  if (!text || !phrase) return false;
+  const pattern = new RegExp(`(^| )${escapeRegex(phrase)}($| )`, "i");
+  return pattern.test(text);
+}
+
 function collectMatchedKeywords(text: string, keywords: string[]): string[] {
   const normalizedText = normalize(text);
 
   return keywords.filter((keyword) => {
     const normalizedKeyword = normalize(keyword);
     if (!normalizedKeyword) return false;
-    if (normalizedText.includes(normalizedKeyword)) return true;
+    if (containsNormalizedPhrase(normalizedText, normalizedKeyword)) return true;
 
     const keywordTokens = tokenize(normalizedKeyword);
     if (keywordTokens.length < 2) return false;
@@ -123,6 +133,10 @@ export function scoreJobAgainstProfile(
     `${jobTitle}\n${combinedText}`,
     profile.qualificationKeywords,
   );
+  const matchedNegativeTitleKeywords = collectMatchedKeywords(
+    `${jobTitle}\n${combinedText}`,
+    profile.negativeTitleKeywords,
+  );
 
   const qualificationScoreBase = Math.min(profile.qualificationKeywords.length, 8) || 1;
   const qualificationScore = Math.min(
@@ -137,12 +151,21 @@ export function scoreJobAgainstProfile(
     normalize(jobTitle).includes(keyword),
   );
   const penalty = hasNonTargetSignal && bestTitleScore < 4 ? 2 : 0;
+  const exclusionPenalty = Math.min(4, matchedNegativeTitleKeywords.length * 4);
 
-  const rawScore = bestTitleScore + qualificationScore + roleMentionBonus - penalty;
+  const rawScore =
+    bestTitleScore
+    + qualificationScore
+    + roleMentionBonus
+    - penalty
+    - exclusionPenalty;
   const score = Math.max(0, Math.min(10, Math.round(rawScore)));
 
   const summaryParts = [
     bestRoleTitle ? `best title match: ${bestRoleTitle}` : null,
+    matchedNegativeTitleKeywords.length > 0
+      ? `excluded terms: ${matchedNegativeTitleKeywords.join(", ")}`
+      : null,
     matchedQualifications.length > 0
       ? `matched qualifications: ${matchedQualifications.slice(0, 4).join(", ")}`
       : "matched qualifications: none",
@@ -166,6 +189,7 @@ export function buildMatchPromptPreview(
       job_description: candidate.descriptionText,
       role_qualifications: candidate.qualificationText,
       target_roles: profile.titles,
+      negative_title_keywords: profile.negativeTitleKeywords,
       target_qualification_keywords: profile.qualificationKeywords,
       instructions:
         "Score this job from 0 to 10 based only on job title, cleaned description, and relevant qualifications. Ignore raw HTML and irrelevant boilerplate.",

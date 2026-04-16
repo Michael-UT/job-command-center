@@ -17,10 +17,17 @@ const ATS_COLORS = {
   unknown: "#555",
 };
 
-const EMPTY_PROFILE = { titles: [], qualificationKeywords: [] };
+const EMPTY_PROFILE = { titles: [], negativeTitleKeywords: [], qualificationKeywords: [] };
 
 function sanitizeItem(value) {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function sanitizeNegativeItem(value) {
+  return sanitizeItem(value)
+    .replace(/^-+/, "")
+    .replace(/^"+|"+$/g, "")
+    .trim();
 }
 
 function addUniqueItem(items, rawValue) {
@@ -30,8 +37,44 @@ function addUniqueItem(items, rawValue) {
   return [...items, value];
 }
 
+function addUniqueNegativeItem(items, rawValue) {
+  const value = sanitizeNegativeItem(rawValue);
+  if (!value) return items;
+  if (items.some((item) => item.toLowerCase() === value.toLowerCase())) return items;
+  return [...items, value];
+}
+
 function removeItem(items, index) {
   return items.filter((_, itemIndex) => itemIndex !== index);
+}
+
+function normalizeProfile(profile) {
+  return {
+    titles: profile?.titles || [],
+    negativeTitleKeywords: profile?.negativeTitleKeywords || [],
+    qualificationKeywords: profile?.qualificationKeywords || [],
+  };
+}
+
+function addTitleInput(profile, rawValue) {
+  const value = sanitizeItem(rawValue);
+  if (!value) return profile;
+
+  if (value.startsWith("-")) {
+    return {
+      ...profile,
+      negativeTitleKeywords: addUniqueNegativeItem(profile.negativeTitleKeywords, value),
+    };
+  }
+
+  return {
+    ...profile,
+    titles: addUniqueItem(profile.titles, value),
+  };
+}
+
+function formatNegativeKeyword(value) {
+  return `-${value}`;
 }
 
 function profileEquals(left, right) {
@@ -54,6 +97,7 @@ function ChipEditor({
   onRemove,
   placeholder,
   helpText,
+  formatItemLabel = (item) => item,
 }) {
   return (
     <div style={{ display: "grid", gap: 8 }}>
@@ -83,26 +127,26 @@ function ChipEditor({
               display: "inline-flex",
               alignItems: "center",
               gap: 6,
-              background: "#171722",
-              border: "1px solid #252538",
+              background: formatItemLabel(item).startsWith("-") ? "#1c1114" : "#171722",
+              border: formatItemLabel(item).startsWith("-") ? "1px solid #3b1c24" : "1px solid #252538",
               borderRadius: 999,
               padding: "5px 10px",
               fontSize: 10,
-              color: "#d4d4dc",
+              color: formatItemLabel(item).startsWith("-") ? "#fca5a5" : "#d4d4dc",
             }}
           >
-            <span>{item}</span>
+            <span>{formatItemLabel(item)}</span>
             <button
               onClick={() => onRemove(index)}
               style={{
                 background: "none",
                 border: "none",
-                color: "#777",
+                color: formatItemLabel(item).startsWith("-") ? "#d97777" : "#777",
                 cursor: "pointer",
                 fontSize: 11,
                 lineHeight: 1,
               }}
-              aria-label={`Remove ${item}`}
+              aria-label={`Remove ${formatItemLabel(item)}`}
             >
               ×
             </button>
@@ -151,6 +195,7 @@ export default function JobCommandCenter() {
   const [defaultProfile, setDefaultProfile] = useState(EMPTY_PROFILE);
   const [profileStats, setProfileStats] = useState(null);
   const [titleInput, setTitleInput] = useState("");
+  const [negativeTitleInput, setNegativeTitleInput] = useState("");
   const [keywordInput, setKeywordInput] = useState("");
   const [search, setSearch] = useState("");
   const [filterATS, setFilterATS] = useState("all");
@@ -175,9 +220,9 @@ export default function JobCommandCenter() {
       const res = await fetch(`${API_BASE}/search-profile`);
       if (!res.ok) return;
       const result = await res.json();
-      setSearchProfile(result.profile);
-      setSavedSearchProfile(result.profile);
-      setDefaultProfile(result.defaults);
+      setSearchProfile(normalizeProfile(result.profile));
+      setSavedSearchProfile(normalizeProfile(result.profile));
+      setDefaultProfile(normalizeProfile(result.defaults));
       setProfileStats(result.query_matrix);
     } catch {
       // server not running
@@ -270,11 +315,11 @@ export default function JobCommandCenter() {
         return;
       }
 
-      setSearchProfile(result.profile);
-      setSavedSearchProfile(result.profile);
-      setDefaultProfile(result.defaults);
+      setSearchProfile(normalizeProfile(result.profile));
+      setSavedSearchProfile(normalizeProfile(result.profile));
+      setDefaultProfile(normalizeProfile(result.defaults));
       setProfileStats(result.query_matrix);
-      setStatusMsg("Search profile saved. The next scrape will use the updated titles and keywords.");
+      setStatusMsg("Search profile saved. The next scrape will use the updated titles, exclusions, and keywords.");
       fetchJobs();
     } catch {
       setStatusMsg("Failed to save search profile.");
@@ -321,11 +366,25 @@ export default function JobCommandCenter() {
   };
 
   const subtitle = useMemo(() => {
-    if (searchProfile.titles.length === 0) return "Dynamic role search profile";
+    if (searchProfile.titles.length === 0 && searchProfile.negativeTitleKeywords.length === 0) {
+      return "Dynamic role search profile";
+    }
+
     const preview = searchProfile.titles.slice(0, 3).join(" / ");
-    return searchProfile.titles.length > 3
+    const titleSummary = searchProfile.titles.length > 3
       ? `${preview} +${searchProfile.titles.length - 3} more`
       : preview;
+
+    if (searchProfile.negativeTitleKeywords.length === 0) {
+      return titleSummary;
+    }
+
+    const exclusionPreview = searchProfile.negativeTitleKeywords
+      .slice(0, 2)
+      .map(formatNegativeKeyword)
+      .join(", ");
+
+    return `${titleSummary} | excludes ${exclusionPreview}${searchProfile.negativeTitleKeywords.length > 2 ? ` +${searchProfile.negativeTitleKeywords.length - 2} more` : ""}`;
   }, [searchProfile]);
 
   const JobRow = ({ job, greyed = false }) => {
@@ -529,12 +588,13 @@ export default function JobCommandCenter() {
                 Search Profile
               </div>
               <div style={{ fontSize: 10, color: "#666" }}>
-                Target roles drive scraping queries. Qualification keywords drive the local 0–10 match score from cleaned job text.
+                Target roles drive scraping queries. Negative title keywords are passed directly into Google-style `-term` filters. Qualification keywords drive the local 0–10 match score from cleaned job text.
               </div>
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {[
                 { label: "Titles", value: searchProfile.titles.length, color: "#8b5cf6" },
+                { label: "Excludes", value: searchProfile.negativeTitleKeywords.length, color: "#ef4444" },
                 { label: "Keywords", value: searchProfile.qualificationKeywords.length, color: "#10b981" },
                 { label: "Batches", value: profileStats?.titleBatches || 0, color: "#f59e0b" },
                 { label: "Queries", value: profileStats?.totalQueries || 0, color: "#3b82f6" },
@@ -558,10 +618,7 @@ export default function JobCommandCenter() {
               inputValue={titleInput}
               onInputChange={setTitleInput}
               onAdd={() => {
-                setSearchProfile((current) => ({
-                  ...current,
-                  titles: addUniqueItem(current.titles, titleInput),
-                }));
+                setSearchProfile((current) => addTitleInput(current, titleInput));
                 setTitleInput("");
               }}
               onRemove={(index) =>
@@ -571,7 +628,33 @@ export default function JobCommandCenter() {
                 }))
               }
               placeholder='Type a role title and press Enter, for example "solutions architect AI"'
-              helpText="These titles are chunked into scrape queries. Add broad variants you actually want to search."
+              helpText='These titles are chunked into scrape queries. If you type `-intern` here, it will be routed into the exclusion box below.'
+            />
+
+            <ChipEditor
+              label="Negative Title Keywords"
+              items={searchProfile.negativeTitleKeywords}
+              inputValue={negativeTitleInput}
+              onInputChange={setNegativeTitleInput}
+              onAdd={() => {
+                setSearchProfile((current) => ({
+                  ...current,
+                  negativeTitleKeywords: addUniqueNegativeItem(
+                    current.negativeTitleKeywords,
+                    negativeTitleInput,
+                  ),
+                }));
+                setNegativeTitleInput("");
+              }}
+              onRemove={(index) =>
+                setSearchProfile((current) => ({
+                  ...current,
+                  negativeTitleKeywords: removeItem(current.negativeTitleKeywords, index),
+                }))
+              }
+              placeholder='Type a negative keyword and press Enter, for example "intern"'
+              helpText="These are passed directly into the Google query as exclusions, so `intern` becomes `-intern`."
+              formatItemLabel={formatNegativeKeyword}
             />
 
             <ChipEditor

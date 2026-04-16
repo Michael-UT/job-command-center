@@ -166,7 +166,9 @@ async function main() {
 
   console.log(`Mode: ${QUICK_MODE ? "QUICK (ATS sites only)" : "FULL"}`);
   console.log(`Queries to execute: ${queries.length}`);
-  console.log(`Target roles: ${searchProfile.titles.length} | Qualification keywords: ${searchProfile.qualificationKeywords.length}`);
+  console.log(
+    `Target roles: ${searchProfile.titles.length} | Exclusions: ${searchProfile.negativeTitleKeywords.length} | Qualification keywords: ${searchProfile.qualificationKeywords.length}`,
+  );
   console.log(`Search API: Serper.dev (free tier)\n`);
 
   const jobsData = loadJobs();

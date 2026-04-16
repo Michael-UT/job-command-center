@@ -8,6 +8,7 @@ const SEARCH_PROFILE_PATH = join(__dirname, "../data/search-profile.json");
 
 export interface SearchProfile {
   titles: string[];
+  negativeTitleKeywords: string[];
   qualificationKeywords: string[];
 }
 
@@ -86,9 +87,73 @@ function normalizeList(values: string[] | undefined): string[] {
   return normalized;
 }
 
+function normalizeNegativeKeyword(value: string): string {
+  return value
+    .trim()
+    .replace(/^-+/, "")
+    .replace(/^"+|"+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeNegativeList(values: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const value of values || []) {
+    const trimmed = normalizeNegativeKeyword(value);
+    if (!trimmed) continue;
+
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(trimmed);
+  }
+
+  return normalized;
+}
+
+function splitInlineNegativeTitleKeywords(values: string[] | undefined): {
+  titles: string[];
+  negativeTitleKeywords: string[];
+} {
+  const titles: string[] = [];
+  const negativeTitleKeywords: string[] = [];
+
+  for (const value of normalizeList(values)) {
+    if (value.startsWith("-")) {
+      const negativeKeyword = normalizeNegativeKeyword(value);
+      if (negativeKeyword) negativeTitleKeywords.push(negativeKeyword);
+      continue;
+    }
+
+    titles.push(value);
+  }
+
+  return {
+    titles: normalizeList(titles),
+    negativeTitleKeywords: normalizeNegativeList(negativeTitleKeywords),
+  };
+}
+
+function mergeUnique(left: string[], right: string[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+
+  for (const value of [...left, ...right]) {
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(value);
+  }
+
+  return merged;
+}
+
 export function getDefaultSearchProfile(): SearchProfile {
   return {
     titles: [...DEFAULT_TITLES],
+    negativeTitleKeywords: [],
     qualificationKeywords: [...DEFAULT_QUALIFICATION_KEYWORDS],
   };
 }
@@ -98,11 +163,17 @@ export function normalizeSearchProfile(
 ): SearchProfile {
   const defaults = getDefaultSearchProfile();
 
-  const titles = normalizeList(profile?.titles);
+  const inlineFilters = splitInlineNegativeTitleKeywords(profile?.titles);
+  const titles = inlineFilters.titles;
+  const negativeTitleKeywords = mergeUnique(
+    inlineFilters.negativeTitleKeywords,
+    normalizeNegativeList(profile?.negativeTitleKeywords),
+  );
   const qualificationKeywords = normalizeList(profile?.qualificationKeywords);
 
   return {
     titles: titles.length > 0 ? titles : defaults.titles,
+    negativeTitleKeywords,
     qualificationKeywords:
       qualificationKeywords.length > 0
         ? qualificationKeywords

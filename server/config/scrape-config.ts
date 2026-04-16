@@ -42,16 +42,30 @@ function buildTitleBatches(titles: string[]): string[][] {
   return batches;
 }
 
+function buildNegativeKeywordsClause(negativeTitleKeywords: string[]): string {
+  return negativeTitleKeywords
+    .map((keyword) => (keyword.includes(" ") ? `-"${keyword}"` : `-${keyword}`))
+    .join(" ");
+}
+
 // Build a single Google search query from a title batch + site target
-function buildQuery(titles: string[], site: SiteTarget): string {
+function buildQuery(
+  titles: string[],
+  site: SiteTarget,
+  negativeTitleKeywords: string[],
+): string {
   const orChain = titles.map((title) => `"${title}"`).join(" OR ");
-  return `${site.siteOperator} ${orChain}`;
+  const negativeClause = buildNegativeKeywordsClause(negativeTitleKeywords);
+  return [site.siteOperator, orChain, negativeClause].filter(Boolean).join(" ");
 }
 
 // Build a general web query (no site: restriction) to catch company career pages
-function buildGeneralQuery(titles: string[]): string {
+function buildGeneralQuery(titles: string[], negativeTitleKeywords: string[]): string {
   const orChain = titles.map((title) => `"${title}"`).join(" OR ");
-  return `${orChain} careers apply ${SEARCH_YEAR}`;
+  const negativeClause = buildNegativeKeywordsClause(negativeTitleKeywords);
+  return [orChain, "careers apply", String(SEARCH_YEAR), negativeClause]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export interface SearchQuery {
@@ -60,6 +74,7 @@ export interface SearchQuery {
   siteName: string;
   siteOperator: string;
   titles: string[];
+  negativeTitleKeywords: string[];
 }
 
 // Generate the full query matrix for the current search profile.
@@ -74,20 +89,22 @@ export function generateQueryMatrix(
 
     for (const site of ALL_SITES) {
       queries.push({
-        query: buildQuery(batch, site),
+        query: buildQuery(batch, site, profile.negativeTitleKeywords),
         titleBatchIndex: i,
         siteName: site.name,
         siteOperator: site.siteOperator,
         titles: batch,
+        negativeTitleKeywords: profile.negativeTitleKeywords,
       });
     }
 
     queries.push({
-      query: buildGeneralQuery(batch),
+      query: buildGeneralQuery(batch, profile.negativeTitleKeywords),
       titleBatchIndex: i,
       siteName: "general_web",
       siteOperator: "",
       titles: batch,
+      negativeTitleKeywords: profile.negativeTitleKeywords,
     });
   }
 
@@ -121,6 +138,7 @@ export function getQueryStats(profile: SearchProfile = loadSearchProfile()) {
     totalQueries: matrix.length,
     titleBatches: titleBatches.length,
     totalTitles: profile.titles.length,
+    negativeTitleKeywords: profile.negativeTitleKeywords.length,
     qualificationKeywords: profile.qualificationKeywords.length,
     atsSites: ATS_SITES.length,
     jobBoardSites: JOB_BOARD_SITES.length,

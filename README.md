@@ -39,6 +39,7 @@ npm run build        # production frontend build
 ## Search Profile And Matching
 
 - The dashboard lets you edit target role titles and qualification keywords directly.
+- Negative title keywords can be added in the dashboard and are passed directly into Google-style query exclusions such as `-intern`.
 - Scraping queries are generated from the saved target titles.
 - Match scores are computed locally on a 0-10 scale from job title, cleaned summary text, and qualification text.
 - Raw HTML is not used for matching.
@@ -54,6 +55,7 @@ npm run build        # production frontend build
 
 ## Important Files
 
+- `server/config/search-profile.ts`: default titles, negative-title filters, keyword defaults, and saved profile persistence
 - `server/config/scrape-config.ts`: search titles, sites, and ATS detection
 - `server/scraper/dedup.ts`: persistence, IDs, deduplication, grouped status views
 - `server/scraper/batch-parser.ts`: HTML cleanup plus parser/extractor logic
