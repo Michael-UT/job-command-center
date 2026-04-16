@@ -202,6 +202,7 @@ export default function JobCommandCenter() {
   const [minMatch, setMinMatch] = useState("all");
   const [scraping, setScraping] = useState(false);
   const [applying, setApplying] = useState(null);
+  const [markingApplied, setMarkingApplied] = useState(null);
   const [batchLimit, setBatchLimit] = useState("10");
   const [statusMsg, setStatusMsg] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
@@ -268,7 +269,7 @@ export default function JobCommandCenter() {
 
   const handleApply = async (jobId) => {
     setApplying(jobId);
-    setStatusMsg("Apply agent started. Check terminal for interaction.");
+    setStatusMsg("Apply agent started. It should open a browser, fill what it can, then leave the rest for you.");
     try {
       const res = await fetch(`${API_BASE}/apply/${jobId}`, { method: "POST" });
       const result = await res.json();
@@ -298,6 +299,23 @@ export default function JobCommandCenter() {
       else setStatusMsg(result.message || `Batch apply started for up to ${limit} jobs`);
     } catch {
       setStatusMsg("Failed to start batch apply.");
+    }
+  };
+
+  const handleMarkApplied = async (jobId) => {
+    setMarkingApplied(jobId);
+    try {
+      const res = await fetch(`${API_BASE}/mark-applied/${jobId}`, { method: "POST" });
+      const result = await res.json();
+      if (!res.ok) setStatusMsg(result.error || "Failed to mark job as applied.");
+      else {
+        setStatusMsg(result.message || "Job marked as applied.");
+        fetchJobs();
+      }
+    } catch {
+      setStatusMsg("Failed to mark job as applied.");
+    } finally {
+      setMarkingApplied(null);
     }
   };
 
@@ -449,22 +467,40 @@ export default function JobCommandCenter() {
               Applied {job.date_applied ? formatDate(job.date_applied) : ""}
             </span>
           ) : (
-            <button
-              onClick={() => handleApply(job.id)}
-              disabled={applying === job.id}
-              style={{
-                background: applying === job.id ? "#333" : "#8b5cf6",
-                color: "#fff",
-                border: "none",
-                padding: "4px 12px",
-                borderRadius: 4,
-                fontSize: 10,
-                cursor: "pointer",
-                fontWeight: 600,
-              }}
-            >
-              {applying === job.id ? "..." : "Apply"}
-            </button>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button
+                onClick={() => handleApply(job.id)}
+                disabled={applying === job.id}
+                style={{
+                  background: applying === job.id ? "#333" : "#8b5cf6",
+                  color: "#fff",
+                  border: "none",
+                  padding: "4px 12px",
+                  borderRadius: 4,
+                  fontSize: 10,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                {applying === job.id ? "..." : "Apply"}
+              </button>
+              <button
+                onClick={() => handleMarkApplied(job.id)}
+                disabled={markingApplied === job.id}
+                style={{
+                  background: "#0f172a",
+                  color: "#93c5fd",
+                  border: "1px solid #1e3a8a",
+                  padding: "4px 10px",
+                  borderRadius: 4,
+                  fontSize: 10,
+                  cursor: markingApplied === job.id ? "default" : "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                {markingApplied === job.id ? "..." : "Mark Applied"}
+              </button>
+            </div>
           )}
         </td>
       </tr>

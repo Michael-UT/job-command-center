@@ -4,7 +4,7 @@
 import express from "express";
 import cors from "cors";
 import { spawn } from "child_process";
-import { loadJobs, getJobsByStatus } from "./scraper/dedup.js";
+import { loadJobs, getJobsByStatus, markApplied, saveJobs } from "./scraper/dedup.js";
 import { getQueryStats } from "./config/scrape-config.js";
 import {
   getDefaultSearchProfile,
@@ -205,9 +205,27 @@ app.post("/api/apply/:id", (req, res) => {
   });
 
   res.json({
-    message: `Apply agent started for ${job.company} - ${job.title}. Check terminal for interaction.`,
+    message: `Apply agent started for ${job.company} - ${job.title}. It will try to open a browser and fill high-confidence fields, then leave final review and submission to you.`,
     job_id: jobId,
   });
+});
+
+app.post("/api/mark-applied/:id", (req, res) => {
+  try {
+    const jobId = req.params.id;
+    const data = loadJobs();
+    const success = markApplied(data, jobId);
+
+    if (!success) {
+      res.status(404).json({ error: `Job ${jobId} not found` });
+      return;
+    }
+
+    saveJobs(data);
+    res.json({ message: `Marked ${jobId} as applied.`, job_id: jobId });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // POST /api/apply-all-new — trigger batch apply for all new jobs
