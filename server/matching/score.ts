@@ -78,6 +78,19 @@ function containsNormalizedPhrase(text: string, phrase: string): boolean {
   return pattern.test(text);
 }
 
+function hasSpecializedTitleVariant(jobTitle: string, roleTitle: string): boolean {
+  const normalizedJobTitle = normalize(jobTitle);
+  const normalizedRoleTitle = normalize(roleTitle);
+
+  if (!normalizedJobTitle || !normalizedRoleTitle) return false;
+  if (normalizedJobTitle === normalizedRoleTitle) return false;
+  if (!normalizedJobTitle.startsWith(`${normalizedRoleTitle} `)) return false;
+
+  const remainder = normalizedJobTitle.slice(normalizedRoleTitle.length).trim();
+  const remainderTokens = tokenize(remainder);
+  return remainderTokens.length > 0 && remainderTokens.length <= 4;
+}
+
 function collectMatchedKeywords(text: string, keywords: string[]): string[] {
   const normalizedText = normalize(text);
 
@@ -145,7 +158,11 @@ export function scoreJobAgainstProfile(
   );
 
   const roleMentionBonus =
-    bestRoleTitle && normalize(combinedText).includes(normalize(bestRoleTitle)) ? 1 : 0;
+    bestRoleTitle && containsNormalizedPhrase(normalize(combinedText), normalize(bestRoleTitle))
+      ? 1
+      : 0;
+  const titleVariantBonus =
+    bestRoleTitle && hasSpecializedTitleVariant(jobTitle, bestRoleTitle) ? 1 : 0;
 
   const hasNonTargetSignal = NON_TARGET_TITLE_KEYWORDS.some((keyword) =>
     normalize(jobTitle).includes(keyword),
@@ -157,12 +174,14 @@ export function scoreJobAgainstProfile(
     bestTitleScore
     + qualificationScore
     + roleMentionBonus
+    + titleVariantBonus
     - penalty
     - exclusionPenalty;
   const score = Math.max(0, Math.min(10, Math.round(rawScore)));
 
   const summaryParts = [
     bestRoleTitle ? `best title match: ${bestRoleTitle}` : null,
+    titleVariantBonus > 0 ? "title variant: specialized" : null,
     matchedNegativeTitleKeywords.length > 0
       ? `excluded terms: ${matchedNegativeTitleKeywords.join(", ")}`
       : null,

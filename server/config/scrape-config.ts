@@ -126,6 +126,7 @@ export function detectATS(url: string): string {
   if (normalizedUrl.includes("workatastartup.com")) return "yc";
   if (normalizedUrl.includes("startup.jobs")) return "startup_jobs";
   if (normalizedUrl.includes("ai-jobs.net")) return "ai_jobs";
+  if (normalizedUrl.includes("/careers/")) return "company_site";
   return "unknown";
 }
 

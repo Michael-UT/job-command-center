@@ -14,6 +14,7 @@ const ATS_COLORS = {
   builtin: "#14b8a6",
   startup_jobs: "#f97316",
   ai_jobs: "#06b6d4",
+  company_site: "#94a3b8",
   unknown: "#555",
 };
 

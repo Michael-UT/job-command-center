@@ -102,6 +102,93 @@ function isJunk(url: string, title: string): boolean {
   return false;
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function looksLikeCompanyName(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 48) return false;
+  if (/[()]/.test(trimmed)) return false;
+  if (/\d/.test(trimmed)) return false;
+  if (trimmed.split(/\s+/).length > 4) return false;
+  if (/\b(careers?|jobs?|remote|hybrid|onsite|on-site|new grad|intern|contract)\b/i.test(trimmed)) {
+    return false;
+  }
+  return /^[A-Z][A-Za-z&.+,' -]*$/.test(trimmed);
+}
+
+function inferCompanyFromSearchResult(title: string | null, snippet: string | null): string | null {
+  const normalizedTitle = (title || "").trim();
+  const normalizedSnippet = (snippet || "").trim();
+
+  const titleSegments = normalizedTitle
+    .split(/\s(?:-|–|—|\|)\s/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const titleCandidate = titleSegments.length > 1 ? titleSegments[titleSegments.length - 1] : null;
+  if (titleCandidate && looksLikeCompanyName(titleCandidate)) {
+    return titleCandidate;
+  }
+
+  const hiringMatch = normalizedSnippet.match(/^([^.,|:]+?)\s+is hiring\b/i)?.[1]?.trim();
+  if (hiringMatch && looksLikeCompanyName(hiringMatch)) {
+    return hiringMatch;
+  }
+
+  const applyAtMatch = normalizedSnippet.match(/\bjob at\s+([^.,|:]+?)(?:[.·|]|$)/i)?.[1]?.trim();
+  if (applyAtMatch && looksLikeCompanyName(applyAtMatch)) {
+    return applyAtMatch;
+  }
+
+  return null;
+}
+
+function cleanSearchResultTitle(title: string | null, company: string | null): string | null {
+  if (!title) return null;
+
+  let cleaned = title.trim().replace(/\s+/g, " ");
+  if (company) {
+    const companyPattern = escapeRegex(company).replace(/\s+/g, "\\s+");
+    cleaned = cleaned.replace(new RegExp(`\\s(?:-|–|—|\\|)\\s${companyPattern}$`, "i"), "").trim();
+  }
+
+  cleaned = cleaned
+    .replace(/\s+\|\s+(Wellfound|Built In|LinkedIn|Y Combinator.*)$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleaned || null;
+}
+
+function buildSnippetQualifications(snippet: string): string | null {
+  const segments = snippet
+    .split(/\s+·\s+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (segments.length < 2) return null;
+  return segments.slice(1).map((segment) => `- ${segment}`).join("\n");
+}
+
+function buildFallbackJob(url: string, result: SearchResult) {
+  const company = inferCompanyFromSearchResult(result.title, result.snippet);
+  return {
+    url,
+    title: cleanSearchResultTitle(result.title || null, company),
+    company,
+    ats: detectATS(url),
+    location: null,
+    salary: null,
+    seniority: null,
+    source: "serper",
+    scrape_detail_failed: true,
+    description_text: result.snippet || null,
+    qualification_text: result.snippet ? buildSnippetQualifications(result.snippet) : null,
+    search_snippet: result.snippet || null,
+  };
+}
+
 // Call Serper.dev Google Search API
 async function serperSearch(query: string): Promise<SearchResponse> {
   try {
@@ -241,18 +328,7 @@ async function main() {
     const html = await fetchPage(url);
     if (!html) {
       detailFailures++;
-      // Add with search snippet info
-      addedThisRun += mergeNewJobs(jobsData, [{
-        url,
-        title: result.title || null,
-        company: null,
-        ats: detectATS(url),
-        location: null,
-        salary: null,
-        seniority: null,
-        source: "serper",
-        scrape_detail_failed: true,
-      }], archivedJobsData.jobs);
+      addedThisRun += mergeNewJobs(jobsData, [buildFallbackJob(url, result)], archivedJobsData.jobs);
       errors.push({
         source: detectATS(url),
         query: url,
@@ -265,6 +341,7 @@ async function main() {
 
     try {
       const parsed = await parseSinglePage({ url, html, ats: detectATS(url), source: "serper" });
+      const fallbackJob = buildFallbackJob(url, result);
 
       if (parsed.is_job_posting && parsed.status !== "closed") {
         // Filter non-US jobs
@@ -274,16 +351,17 @@ async function main() {
           const matchContext = extractJobMatchContext(html);
           const added = mergeNewJobs(jobsData, [{
             url,
-            title: parsed.title || result.title || null,
-            company: parsed.company,
+            title: parsed.title || fallbackJob.title,
+            company: parsed.company || fallbackJob.company,
             ats: parsed.ats,
             location: parsed.location,
             salary: parsed.salary,
             seniority: parsed.seniority,
             source: parsed.source,
             scrape_detail_failed: false,
-            description_text: matchContext.descriptionText,
-            qualification_text: matchContext.qualificationText,
+            description_text: matchContext.descriptionText || fallbackJob.description_text,
+            qualification_text: matchContext.qualificationText || fallbackJob.qualification_text,
+            search_snippet: fallbackJob.search_snippet,
           }], archivedJobsData.jobs);
           addedThisRun += added;
           parseSuccess++;
@@ -297,17 +375,7 @@ async function main() {
         console.log(`✗ Closed`);
       } else if (parsed.parse_failed) {
         detailFailures++;
-        addedThisRun += mergeNewJobs(jobsData, [{
-          url,
-          title: result.title || null,
-          company: null,
-          ats: detectATS(url),
-          location: null,
-          salary: null,
-          seniority: null,
-          source: "serper",
-          scrape_detail_failed: true,
-        }], archivedJobsData.jobs);
+        addedThisRun += mergeNewJobs(jobsData, [fallbackJob], archivedJobsData.jobs);
         errors.push({
           source: detectATS(url),
           query: url,
@@ -321,17 +389,7 @@ async function main() {
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       detailFailures++;
-      addedThisRun += mergeNewJobs(jobsData, [{
-        url,
-        title: result.title || null,
-        company: null,
-        ats: detectATS(url),
-        location: null,
-        salary: null,
-        seniority: null,
-        source: "serper",
-        scrape_detail_failed: true,
-      }], archivedJobsData.jobs);
+      addedThisRun += mergeNewJobs(jobsData, [buildFallbackJob(url, result)], archivedJobsData.jobs);
       errors.push({
         source: detectATS(url),
         query: url,

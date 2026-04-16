@@ -35,12 +35,13 @@ function enrichJobMatches<
     date_found: string;
     description_text?: string | null;
     qualification_text?: string | null;
+    search_snippet?: string | null;
   },
 >(job: T, profile: SearchProfile) {
   const match = scoreJobAgainstProfile(
     {
       title: job.title,
-      descriptionText: job.description_text || null,
+      descriptionText: job.description_text || job.search_snippet || null,
       qualificationText: job.qualification_text || null,
     },
     profile,

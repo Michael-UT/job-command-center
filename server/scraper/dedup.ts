@@ -24,6 +24,7 @@ export interface Job {
   scrape_detail_failed: boolean;
   description_text?: string | null;
   qualification_text?: string | null;
+  search_snippet?: string | null;
 }
 
 export interface ArchivedJob extends Job {
@@ -56,12 +57,39 @@ function defaultArchivedJobsData(): ArchivedJobsData {
   return { jobs: [] };
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getLocalDateStamp(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+
+  if (!year || !month || !day) {
+    return date.toISOString().split("T")[0];
+  }
+
+  return `${year}-${month}-${day}`;
+}
+
 export function loadJobs(): JobsData {
   if (!existsSync(JOBS_PATH)) {
     return defaultJobsData();
   }
   const raw = readFileSync(JOBS_PATH, "utf-8");
-  return { ...defaultJobsData(), ...JSON.parse(raw) } as JobsData;
+  const parsed = { ...defaultJobsData(), ...JSON.parse(raw) } as JobsData;
+
+  return {
+    ...parsed,
+    jobs: reconcileJobs(parsed.jobs || []),
+  };
 }
 
 export function saveJobs(data: JobsData): void {
@@ -78,10 +106,14 @@ export function loadArchivedJobs(): ArchivedJobsData {
   const parsed = JSON.parse(raw) as ArchivedJobsData | ArchivedJob[];
 
   if (Array.isArray(parsed)) {
-    return { jobs: parsed };
+    return { jobs: parsed.map(hydrateArchivedJob) };
   }
 
-  return { ...defaultArchivedJobsData(), ...parsed };
+  return {
+    ...defaultArchivedJobsData(),
+    ...parsed,
+    jobs: (parsed.jobs || []).map(hydrateArchivedJob),
+  };
 }
 
 export function saveArchivedJobs(data: ArchivedJobsData): void {
@@ -111,6 +143,96 @@ function normalizeUrl(url: string): string {
   }
 }
 
+function normalizeCompany(company: string | null | undefined): string | null {
+  const normalized = (company || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+  return normalized || null;
+}
+
+function looksLikeCompanyName(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 48) return false;
+  if (/[()]/.test(trimmed)) return false;
+  if (/\d/.test(trimmed)) return false;
+  if (trimmed.split(/\s+/).length > 4) return false;
+  if (/\b(careers?|jobs?|remote|hybrid|onsite|on-site|new grad|intern|contract)\b/i.test(trimmed)) {
+    return false;
+  }
+  return /^[A-Z][A-Za-z&.+,' -]*$/.test(trimmed);
+}
+
+function inferCompanyFromTitle(title: string | null | undefined): string | null {
+  if (!title) return null;
+
+  const segments = title
+    .split(/\s(?:-|–|—|\|)\s/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (segments.length < 2) return null;
+  const candidate = segments[segments.length - 1];
+  return looksLikeCompanyName(candidate) ? candidate : null;
+}
+
+function stripCompanyFromTitle(title: string, company: string | null | undefined): string {
+  if (!title) return "";
+
+  const effectiveCompany = company || inferCompanyFromTitle(title);
+  if (!effectiveCompany) return title.trim();
+
+  const companyPattern = escapeRegex(effectiveCompany).replace(/\s+/g, "\\s+");
+  return title
+    .replace(new RegExp(`\\s(?:-|–|—|\\|)\\s${companyPattern}$`, "i"), "")
+    .replace(new RegExp(`\\s+at\\s+${companyPattern}(?=\\s|$)`, "i"), " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeTitleForDedup(title: string | null, company: string | null | undefined): string | null {
+  if (!title) return null;
+
+  const cleaned = stripCompanyFromTitle(title, company)
+    .replace(/\bjob application for\b/gi, " ")
+    .replace(/\bcareers?\b/gi, " ")
+    .replace(/\b(wellfound|built in|linkedin|y combinator)\b/gi, " ")
+    .replace(/[|•]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+  return cleaned || null;
+}
+
+function hydrateIncomingJob(
+  job: Omit<Job, "id" | "date_found" | "date_applied" | "status">,
+): Omit<Job, "id" | "date_found" | "date_applied" | "status"> {
+  return {
+    ...job,
+    ats: job.ats === "unknown" && job.url.toLowerCase().includes("/careers/") ? "company_site" : job.ats,
+    company: job.company || inferCompanyFromTitle(job.title),
+    description_text: job.description_text || job.search_snippet || null,
+  };
+}
+
+function hydrateJob(job: Job): Job {
+  return {
+    ...job,
+    ...hydrateIncomingJob(job),
+  };
+}
+
+function hydrateArchivedJob(job: ArchivedJob): ArchivedJob {
+  return {
+    ...job,
+    ...hydrateIncomingJob(job),
+  };
+}
+
 // Check if a URL already exists in the jobs list
 export function isDuplicate(jobs: JobIdentity[], url: string): boolean {
   const normalized = normalizeUrl(url);
@@ -119,8 +241,10 @@ export function isDuplicate(jobs: JobIdentity[], url: string): boolean {
 
 // Normalize title+company for cross-site dedup
 function normalizeForDedup(title: string | null, company: string | null): string | null {
-  if (!title || !company) return null;
-  return `${title.toLowerCase().replace(/[^a-z0-9]/g, "")}::${company.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+  const normalizedTitle = normalizeTitleForDedup(title, company);
+  const normalizedCompany = normalizeCompany(company || inferCompanyFromTitle(title));
+  if (!normalizedTitle || !normalizedCompany) return null;
+  return `${normalizedTitle}::${normalizedCompany}`;
 }
 
 // Check if same job (by title+company) already exists from a different site
@@ -134,19 +258,182 @@ export function isCrossSiteDuplicate(
   return jobs.some((j) => normalizeForDedup(j.title, j.company) === key);
 }
 
+function findDuplicateByUrl<T extends JobIdentity>(jobs: T[], url: string): T | null {
+  const normalizedUrl = normalizeUrl(url);
+  return jobs.find((job) => normalizeUrl(job.url) === normalizedUrl) || null;
+}
+
+function findCrossSiteDuplicateJob<T extends JobIdentity>(
+  jobs: T[],
+  title: string | null,
+  company: string | null,
+): T | null {
+  const key = normalizeForDedup(title, company);
+  if (!key) return null;
+  return jobs.find((job) => normalizeForDedup(job.title, job.company) === key) || null;
+}
+
+function titleHasCompanySuffix(title: string | null, company: string | null): boolean {
+  if (!title || !company) return false;
+  const companyPattern = escapeRegex(company).replace(/\s+/g, "\\s+");
+  return new RegExp(`\\s(?:-|–|—|\\|)\\s${companyPattern}$`, "i").test(title);
+}
+
+function shouldPreferIncomingTitle(
+  currentTitle: string | null,
+  incomingTitle: string | null,
+  company: string | null,
+): boolean {
+  if (!incomingTitle) return false;
+  if (!currentTitle) return true;
+
+  if (titleHasCompanySuffix(currentTitle, company) && !titleHasCompanySuffix(incomingTitle, company)) {
+    return true;
+  }
+
+  const currentStripped = stripCompanyFromTitle(currentTitle, company);
+  const incomingStripped = stripCompanyFromTitle(incomingTitle, company);
+  return currentStripped === incomingStripped && incomingTitle.length < currentTitle.length;
+}
+
+function shouldPreferIncomingText(currentValue: string | null | undefined, incomingValue: string | null | undefined): boolean {
+  if (!incomingValue) return false;
+  if (!currentValue) return true;
+  return incomingValue.length > currentValue.length + 40;
+}
+
+function getStatusRank(status: Job["status"]): number {
+  switch (status) {
+    case "applied":
+      return 3;
+    case "skipped":
+      return 2;
+    case "new":
+    default:
+      return 1;
+  }
+}
+
+function mergeJobData(
+  target: Job,
+  incomingRaw: Omit<Job, "id" | "date_found" | "date_applied" | "status"> | Job,
+): boolean {
+  const incoming = hydrateIncomingJob(incomingRaw);
+  const resolvedCompany = target.company || incoming.company || inferCompanyFromTitle(target.title);
+  let changed = false;
+
+  if (!target.company && incoming.company) {
+    target.company = incoming.company;
+    changed = true;
+  }
+
+  if (shouldPreferIncomingTitle(target.title, incoming.title, resolvedCompany)) {
+    target.title = incoming.title;
+    changed = true;
+  }
+
+  if (!target.location && incoming.location) {
+    target.location = incoming.location;
+    changed = true;
+  }
+
+  if (!target.salary && incoming.salary) {
+    target.salary = incoming.salary;
+    changed = true;
+  }
+
+  if (!target.seniority && incoming.seniority) {
+    target.seniority = incoming.seniority;
+    changed = true;
+  }
+
+  if (!target.search_snippet && incoming.search_snippet) {
+    target.search_snippet = incoming.search_snippet;
+    changed = true;
+  }
+
+  if (shouldPreferIncomingText(target.description_text, incoming.description_text)) {
+    target.description_text = incoming.description_text;
+    changed = true;
+  }
+
+  if (shouldPreferIncomingText(target.qualification_text, incoming.qualification_text)) {
+    target.qualification_text = incoming.qualification_text;
+    changed = true;
+  }
+
+  if (target.scrape_detail_failed && !incoming.scrape_detail_failed) {
+    target.scrape_detail_failed = false;
+    changed = true;
+  }
+
+  if ("status" in incomingRaw && getStatusRank(incomingRaw.status) > getStatusRank(target.status)) {
+    target.status = incomingRaw.status;
+    changed = true;
+  }
+
+  if ("date_applied" in incomingRaw && !target.date_applied && incomingRaw.date_applied) {
+    target.date_applied = incomingRaw.date_applied;
+    changed = true;
+  }
+
+  if (!target.description_text && target.search_snippet) {
+    target.description_text = target.search_snippet;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function reconcileJobs(jobs: Job[]): Job[] {
+  const merged: Job[] = [];
+
+  for (const rawJob of jobs) {
+    const job = hydrateJob(rawJob);
+    const duplicateByUrl = findDuplicateByUrl(merged, job.url);
+    if (duplicateByUrl) {
+      mergeJobData(duplicateByUrl, job);
+      continue;
+    }
+
+    const duplicateByKey = findCrossSiteDuplicateJob(merged, job.title, job.company);
+    if (duplicateByKey) {
+      mergeJobData(duplicateByKey, job);
+      continue;
+    }
+
+    merged.push(job);
+  }
+
+  return merged;
+}
+
 // Add new jobs, skipping URL duplicates and cross-site duplicates.
 export function mergeNewJobs(
   existing: JobsData,
   newJobs: Omit<Job, "id" | "date_found" | "date_applied" | "status">[],
   archivedJobs: ArchivedJob[] = [],
 ): number {
-  const today = new Date().toISOString().split("T")[0];
+  const today = getLocalDateStamp();
   let added = 0;
-  const knownJobs: JobIdentity[] = [...existing.jobs, ...archivedJobs];
 
-  for (const job of newJobs) {
-    if (isDuplicate(knownJobs, job.url)) continue;
-    if (isCrossSiteDuplicate(knownJobs, job.title, job.company)) continue;
+  for (const rawJob of newJobs) {
+    const job = hydrateIncomingJob(rawJob);
+    const duplicateByUrl = findDuplicateByUrl(existing.jobs, job.url);
+    if (duplicateByUrl) {
+      mergeJobData(duplicateByUrl, job);
+      continue;
+    }
+
+    if (findDuplicateByUrl(archivedJobs, job.url)) continue;
+
+    const duplicateByKey = findCrossSiteDuplicateJob(existing.jobs, job.title, job.company);
+    if (duplicateByKey) {
+      mergeJobData(duplicateByKey, job);
+      continue;
+    }
+
+    if (findCrossSiteDuplicateJob(archivedJobs, job.title, job.company)) continue;
 
     const newJob: Job = {
       ...job,
@@ -157,7 +444,6 @@ export function mergeNewJobs(
     };
 
     existing.jobs.push(newJob);
-    knownJobs.push(newJob);
     added++;
   }
 
@@ -222,7 +508,7 @@ export function restoreArchivedJob(
 
 // Get jobs grouped by status
 export function getJobsByStatus(data: JobsData) {
-  const today = new Date().toISOString().split("T")[0];
+  const today = getLocalDateStamp();
   return {
     newToday: data.jobs.filter((j) => j.status === "new" && j.date_found === today),
     previouslySeen: data.jobs.filter((j) => j.status === "new" && j.date_found !== today),
