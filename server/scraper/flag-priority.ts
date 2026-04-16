@@ -42,6 +42,8 @@ async function main() {
     seniority: null,
     source: j.source,
     scrape_detail_failed: false,
+    description: j.description,
+    priority: true,
   }));
 
   const before = data.jobs.length;

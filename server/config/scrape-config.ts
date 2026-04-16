@@ -164,7 +164,32 @@ export function detectATS(url: string): string {
   if (u.includes("workatastartup.com")) return "yc";
   if (u.includes("startup.jobs")) return "startup_jobs";
   if (u.includes("ai-jobs.net")) return "ai_jobs";
-  return "unknown";
+
+  // Company-direct career pages — label as {company}_careers so the UI
+  // shows something meaningful instead of "unknown"
+  if (u.includes("openai.com/careers")) return "openai_careers";
+  if (u.includes("careers.adobe.com")) return "adobe_careers";
+  if (u.includes("jobs.lenovo.com")) return "lenovo_careers";
+  if (u.includes("jobs.comcast.com")) return "comcast_careers";
+  if (u.includes("accenture.com")) return "accenture_careers";
+  if (u.includes("echostar.com")) return "echostar_careers";
+
+  // Aggregators / repost sites
+  if (u.includes("remoterocketship.com")) return "remoterocketship";
+  if (u.includes("tallo.com")) return "tallo";
+  if (u.includes("jobrapido.com")) return "jobrapido";
+  if (u.includes("career.io")) return "career_io";
+  if (u.includes("jobgether.com")) return "jobgether";
+
+  // Fallback: use the hostname (minus www. and TLD) so the column is
+  // never blank — callers can still test for "unknown"-prefixed values.
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    const label = host.split(".")[0];
+    return label ? `host_${label}` : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 // Summary stats

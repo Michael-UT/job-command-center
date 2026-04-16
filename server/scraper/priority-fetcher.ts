@@ -37,6 +37,24 @@ export interface FetchedJob {
   salary: string | null;
   ats: string;
   source: string;
+  description: string | null;
+}
+
+function stripHtml(html: string | null | undefined, limit = 2500): string | null {
+  if (!html) return null;
+  const text = String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<\/?(br|p|div|li|h[1-6])[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
+    .replace(/&#\d+;/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n\s*\n+/g, "\n\n")
+    .trim();
+  if (!text) return null;
+  return text.length > limit ? text.slice(0, limit).trim() + "..." : text;
 }
 
 // Format a number like 295000 as "$295k"
@@ -85,6 +103,7 @@ async function fetchGreenhouse(company: PriorityCompany): Promise<FetchedJob[]> 
         salary: extractSalaryFromHtml(j.content || ""),
         ats: "greenhouse",
         source: "priority_greenhouse_api",
+        description: stripHtml(j.content),
       }));
   } catch {
     return [];
@@ -120,6 +139,7 @@ async function fetchAshby(company: PriorityCompany): Promise<FetchedJob[]> {
           salary,
           ats: "ashby",
           source: "priority_ashby_api",
+          description: stripHtml(j.descriptionHtml || j.descriptionPlain || j.description),
         };
       });
   } catch {
@@ -145,6 +165,7 @@ async function fetchLever(company: PriorityCompany): Promise<FetchedJob[]> {
         salary: extractSalaryFromHtml(j.descriptionPlain || j.description || ""),
         ats: "lever",
         source: "priority_lever_api",
+        description: stripHtml(j.descriptionPlain || j.description),
       }));
   } catch {
     return [];
@@ -184,6 +205,7 @@ async function fetchRippling(company: PriorityCompany): Promise<FetchedJob[]> {
         salary: null,
         ats: "rippling",
         source: "priority_rippling",
+        description: stripHtml(j.description),
       }));
   } catch {
     return [];
@@ -214,6 +236,7 @@ async function fetchCustom(company: PriorityCompany): Promise<FetchedJob[]> {
         salary: null,
         ats: "custom",
         source: "priority_custom_serper",
+        description: o.snippet || null,
       }));
   } catch {
     return [];

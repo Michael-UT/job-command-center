@@ -56,6 +56,12 @@ export default function JobCommandCenter() {
   const [priorityOnly, setPriorityOnly] = useState(() => {
     return localStorage.getItem("jcc_priority_only") === "true";
   });
+  const [filterLocation, setFilterLocation] = useState(() => {
+    return localStorage.getItem("jcc_filter_location") || "all";
+  });
+  const [minScore, setMinScore] = useState(() => {
+    return parseFloat(localStorage.getItem("jcc_min_score") || "0");
+  });
   const [scraping, setScraping] = useState(false);
   const [applying, setApplying] = useState(null);
   const [statusMsg, setStatusMsg] = useState("");
@@ -91,6 +97,16 @@ export default function JobCommandCenter() {
   useEffect(() => {
     localStorage.setItem("jcc_priority_only", String(priorityOnly));
   }, [priorityOnly]);
+
+  // Persist location filter
+  useEffect(() => {
+    localStorage.setItem("jcc_filter_location", filterLocation);
+  }, [filterLocation]);
+
+  // Persist min score filter
+  useEffect(() => {
+    localStorage.setItem("jcc_min_score", String(minScore));
+  }, [minScore]);
 
   const addExcludeTerm = (term) => {
     const trimmed = term.trim();
@@ -168,6 +184,16 @@ export default function JobCommandCenter() {
       }
       if (filterATS !== "all") f = f.filter(j => j.ats === filterATS);
       if (priorityOnly) f = f.filter(j => j.priority);
+      if (filterLocation !== "all") {
+        f = f.filter(j => {
+          const loc = (j.location || "").toLowerCase();
+          if (!loc) return true; // keep jobs with unknown location — they might match
+          if (filterLocation === "nyc") return loc.includes("new york") || loc.includes("nyc") || loc.includes("brooklyn") || loc.includes("manhattan");
+          if (filterLocation === "sf") return loc.includes("san francisco") || loc.includes("sf") || loc.includes("bay area") || loc.includes("palo alto") || loc.includes("mountain view") || loc.includes("menlo park");
+          if (filterLocation === "remote") return loc.includes("remote");
+          return true;
+        });
+      }
       if (excludeLower.length > 0) {
         f = f.filter(j => {
           const title = (j.title || "").toLowerCase();
@@ -176,10 +202,33 @@ export default function JobCommandCenter() {
           return !excludeLower.some(t => title.includes(t) || company.includes(t) || location.includes(t));
         });
       }
-      // Sort by score descending (nulls last)
+      // Min score filter
+      if (minScore > 0) {
+        f = f.filter(j => (j.score ?? 0) >= minScore);
+      }
+      // Sort: if location filter is active, confirmed matches first, blanks second, both sub-sorted by score
+      if (filterLocation !== "all") {
+        const locMatchers = {
+          nyc: (loc) => /new york|nyc|brooklyn|manhattan/i.test(loc),
+          sf: (loc) => /san francisco|sf|bay area|palo alto|mountain view|menlo park/i.test(loc),
+          remote: (loc) => /remote/i.test(loc),
+        };
+        const matcher = locMatchers[filterLocation];
+        if (matcher) {
+          return [...f].sort((a, b) => {
+            const aLoc = a.location || "";
+            const bLoc = b.location || "";
+            const aMatch = aLoc && matcher(aLoc) ? 1 : 0;
+            const bMatch = bLoc && matcher(bLoc) ? 1 : 0;
+            if (aMatch !== bMatch) return bMatch - aMatch; // confirmed matches first
+            return (b.score ?? -1) - (a.score ?? -1); // then by score
+          });
+        }
+      }
+      // Default: sort by score descending (nulls last)
       return [...f].sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
     };
-  }, [debouncedSearch, filterATS, priorityOnly, excludeTerms]);
+  }, [debouncedSearch, filterATS, priorityOnly, filterLocation, excludeTerms, minScore]);
 
   // Pre-filter all sections once per filter change (instead of on every render)
   const filtered = useMemo(() => ({
@@ -245,40 +294,48 @@ export default function JobCommandCenter() {
 
   const JobRow = ({ job, showApply = false }) => (
     <tr style={{ opacity: job.status === "rejected" || job.status === "skipped" ? 0.4 : 1, borderBottom: "1px solid #1a1a22" }}>
-      <td style={{ padding: "10px 12px", fontSize: 12, maxWidth: 280 }}>
+      <td style={{ padding: "10px 12px", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {job.priority && <span title="Priority company" style={{ color: "#eab308", marginRight: 4 }}>★</span>}
-        <a href={job.url} target="_blank" rel="noopener noreferrer" style={{ color: "#c4b5fd", textDecoration: "none" }}>
+        <a href={job.url} target="_blank" rel="noopener noreferrer" style={{ color: "#c4b5fd", textDecoration: "none" }} title={job.title || ""}>
           {job.title || "Untitled"}
         </a>
       </td>
-      <td style={{ padding: "10px 8px", fontSize: 12, color: "#e0e0e5" }}>{job.company || "\u2014"}</td>
+      <td style={{ padding: "10px 8px", fontSize: 12, color: "#e0e0e5", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{job.company || "\u2014"}</td>
       <td style={{ padding: "10px 8px", textAlign: "center" }}><ScoreBadge score={job.score} /></td>
-      <td style={{ padding: "10px 8px", fontSize: 11, color: "#888" }}>{job.location || "\u2014"}</td>
-      <td style={{ padding: "10px 8px", fontSize: 11, color: job.salary ? "#10b981" : "#333" }}>{job.salary || "\u2014"}</td>
+      <td style={{ padding: "10px 8px", fontSize: 11, color: "#888", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{job.location || "\u2014"}</td>
+      <td style={{ padding: "10px 8px", fontSize: 11, color: job.salary ? "#10b981" : "#333", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{job.salary || "\u2014"}</td>
       <td style={{ padding: "10px 8px" }}>
         <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: `${ATS_COLORS[job.ats] || "#555"}22`, color: ATS_COLORS[job.ats] || "#555", textTransform: "uppercase", fontWeight: 600 }}>
           {job.ats}
         </span>
       </td>
       <td style={{ padding: "10px 8px", fontSize: 10, color: "#555" }}>{job.date_found}</td>
-      <td style={{ padding: "10px 8px", display: "flex", gap: 4, alignItems: "center" }}>
-        {showApply && (
-          <button onClick={() => handleApply(job.id)} disabled={applying === job.id}
-            style={{ background: applying === job.id ? "#333" : "#8b5cf6", color: "#fff", border: "none", padding: "4px 10px", borderRadius: 4, fontSize: 10, cursor: "pointer", fontWeight: 600 }}>
-            {applying === job.id ? "..." : "Apply"}
-          </button>
-        )}
-        <StatusSelect job={job} />
+      <td style={{ padding: "10px 8px" }}>
+        <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "nowrap" }}>
+          {showApply && (
+            <button onClick={() => handleApply(job.id)} disabled={applying === job.id}
+              style={{ background: applying === job.id ? "#333" : "#8b5cf6", color: "#fff", border: "none", padding: "4px 10px", borderRadius: 4, fontSize: 10, cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap" }}>
+              {applying === job.id ? "..." : "Apply"}
+            </button>
+          )}
+          <StatusSelect job={job} />
+        </div>
       </td>
     </tr>
   );
 
+  const COL_WIDTHS = { Title: "22%", Company: "13%", Score: "6%", Location: "14%", Salary: "10%", ATS: "7%", Found: "8%", Status: "20%" };
+  const HEADERS = ["Title", "Company", "Score", "Location", "Salary", "ATS", "Found", "Status"];
+
   const JobTable = ({ jobs, showApply = false }) => (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+      <colgroup>
+        {HEADERS.map(h => <col key={h} style={{ width: COL_WIDTHS[h] }} />)}
+      </colgroup>
       <thead>
         <tr style={{ borderBottom: "1px solid #222" }}>
-          {["Title", "Company", "Score", "Location", "Salary", "ATS", "Found", ""].map(h => (
-            <th key={h} style={{ padding: "8px 12px", fontSize: 9, color: "#555", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: h === "Score" ? "center" : "left", fontWeight: 600 }}>{h}</th>
+          {HEADERS.map(h => (
+            <th key={h} style={{ padding: "8px 12px", fontSize: 9, color: "#555", textTransform: "uppercase", letterSpacing: "0.5px", textAlign: h === "Score" ? "center" : "left", fontWeight: 600, overflow: "hidden" }}>{h}</th>
           ))}
         </tr>
       </thead>
@@ -375,11 +432,11 @@ export default function JobCommandCenter() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 8, marginBottom: 12 }}>
               {[
                 { label: "Total", val: data.total, color: "#8b5cf6" },
-                { label: "New Today", val: data.newToday?.length || 0, color: "#10b981" },
-                { label: "Previously Seen", val: data.previouslySeen?.length || 0, color: "#f59e0b" },
-                { label: "Applied", val: data.applied?.length || 0, color: "#3b82f6" },
-                { label: "Interviewing", val: data.interviewing?.length || 0, color: "#a855f7" },
-                { label: "Offers", val: data.offer?.length || 0, color: "#eab308" },
+                { label: "New Today", val: filtered.newToday.length, color: "#10b981" },
+                { label: "Previously Seen", val: filtered.previouslySeen.length, color: "#f59e0b" },
+                { label: "Applied", val: filtered.applied.length, color: "#3b82f6" },
+                { label: "Interviewing", val: filtered.interviewing.length, color: "#a855f7" },
+                { label: "Offers", val: filtered.offer.length, color: "#eab308" },
               ].map(s => (
                 <div key={s.label} style={{ background: "#111118", border: "1px solid #1a1a22", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: s.color, fontFamily: "'Space Grotesk', sans-serif" }}>{s.val}</div>
@@ -403,6 +460,22 @@ export default function JobCommandCenter() {
                 style={{ background: "#111118", border: "1px solid #222", borderRadius: 6, padding: "8px", color: "#e0e0e5", fontSize: 11 }}>
                 <option value="all">All ATS</option>
                 {allATS.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+              <select value={filterLocation} onChange={e => setFilterLocation(e.target.value)}
+                style={{ background: "#111118", border: `1px solid ${filterLocation !== "all" ? "#8b5cf6" : "#222"}`, borderRadius: 6, padding: "8px", color: filterLocation !== "all" ? "#8b5cf6" : "#e0e0e5", fontSize: 11, fontWeight: filterLocation !== "all" ? 600 : 400 }}>
+                <option value="all">All Locations</option>
+                <option value="nyc">NYC / New York</option>
+                <option value="sf">SF / Bay Area</option>
+                <option value="remote">Remote</option>
+              </select>
+              <select value={minScore} onChange={e => setMinScore(parseFloat(e.target.value))}
+                style={{ background: "#111118", border: `1px solid ${minScore > 0 ? "#10b981" : "#222"}`, borderRadius: 6, padding: "8px", color: minScore > 0 ? "#10b981" : "#e0e0e5", fontSize: 11, fontWeight: minScore > 0 ? 600 : 400 }}>
+                <option value="0">All Scores</option>
+                <option value="9">9.0+ only</option>
+                <option value="8">8.0+ only</option>
+                <option value="7">7.0+ only</option>
+                <option value="6">6.0+ only</option>
+                <option value="5">5.0+ only</option>
               </select>
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: priorityOnly ? "#eab308" : "#888", cursor: "pointer", padding: "8px 10px", background: "#111118", border: `1px solid ${priorityOnly ? "#eab308" : "#222"}`, borderRadius: 6 }}>
                 <input type="checkbox" checked={priorityOnly} onChange={e => setPriorityOnly(e.target.checked)} style={{ cursor: "pointer" }} />

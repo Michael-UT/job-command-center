@@ -19,11 +19,13 @@ export interface Job {
   seniority: string | null;
   source: string;
   score: number | null;
+  score_reasoning: string | null;
   priority: boolean;
   date_found: string;
   date_applied: string | null;
   status: "new" | "applied" | "responded" | "interviewing" | "offer" | "rejected" | "skipped";
   scrape_detail_failed: boolean;
+  description: string | null;
 }
 
 export interface JobsData {
@@ -91,6 +93,56 @@ export function isCrossSiteDuplicate(jobs: Job[], title: string | null, company:
   return jobs.some((j) => normalizeForDedup(j.title, j.company) === key);
 }
 
+// Aggregator/job-board site names that get mistakenly captured as the
+// employer. We null these out so the title-extraction path can find the
+// real employer (e.g., "Engineer at OpenAI" → company: OpenAI).
+const AGGREGATOR_NAMES = new Set([
+  "startup jobs", "startup.jobs",
+  "wellfound", "angellist",
+  "built in", "builtin",
+  "indeed", "glassdoor", "ziprecruiter",
+  "linkedin",
+  "ai jobs", "ai-jobs.net",
+  "jobgether",
+  "available jobs",
+  "yc jobs", "y combinator jobs", "workatastartup",
+  "remote rocketship",
+  "career center",
+]);
+
+function isAggregatorName(c: string | null): boolean {
+  if (!c) return false;
+  return AGGREGATOR_NAMES.has(c.trim().toLowerCase());
+}
+
+// Split "Team Name at EmployerName" → "EmployerName" (drop team context).
+// Used when a page serves the team descriptor as the employer.
+function splitCompanyAt(company: string | null): string | null {
+  if (!company) return company;
+  const m = company.match(/^(.+?)\s+at\s+([A-Z][A-Za-z0-9\s&'.]+?)$/);
+  return m ? m[2].trim() : company;
+}
+
+// Extract a US location hint from a URL slug when parse-time location is missing.
+// Runs on serper-sourced pages whose HTML didn't expose structured data.
+export function locationFromUrlSlug(url: string | null): string | null {
+  if (!url) return null;
+  const slug = url.toLowerCase();
+  if (/\b(us-remote|usa-remote|united-states-remote|remote-usa|remote-us\b)/.test(slug)) return "US Remote";
+  if (/\b(nyc|new-york-city|new-york-ny)\b/.test(slug)) return "New York City";
+  if (/\b(san-francisco|sf-bay-area|palo-alto|mountain-view|menlo-park)\b/.test(slug)) return "San Francisco";
+  if (/\b(seattle)\b/.test(slug)) return "Seattle";
+  if (/\b(austin)\b/.test(slug)) return "Austin";
+  if (/\b(boston)\b/.test(slug)) return "Boston";
+  if (/\b(chicago)\b/.test(slug)) return "Chicago";
+  if (/\b(los-angeles)\b/.test(slug)) return "Los Angeles";
+  if (/\b(washington-dc|washington-d-c)\b/.test(slug)) return "Washington, DC";
+  if (/\b(denver)\b/.test(slug)) return "Denver";
+  if (/\b(atlanta)\b/.test(slug)) return "Atlanta";
+  if (/\b(miami)\b/.test(slug)) return "Miami";
+  return null;
+}
+
 // Extract company from title and clean both fields.
 // Handles patterns like "Engineer at Company", "Engineer - Company", "Engineer | Company"
 export function cleanTitleAndCompany(
@@ -100,7 +152,10 @@ export function cleanTitleAndCompany(
   if (!title) return { title, company };
 
   let cleanedTitle = title;
-  let extractedCompany = company;
+  // Discard aggregator-site names so we re-extract the real employer below
+  let extractedCompany = isAggregatorName(company) ? null : company;
+  // Split "Team at Employer" → "Employer"
+  extractedCompany = splitCompanyAt(extractedCompany);
 
   // Step 1: Strip common prefixes
   cleanedTitle = cleanedTitle
@@ -175,7 +230,7 @@ export function cleanTitleAndCompany(
 // Add new jobs, skipping URL duplicates and cross-site duplicates.
 export function mergeNewJobs(
   existing: JobsData,
-  newJobs: Omit<Job, "id" | "date_found" | "date_applied" | "status">[],
+  newJobs: Omit<Job, "id" | "date_found" | "date_applied" | "status" | "score" | "score_reasoning">[],
 ): number {
   const today = new Date().toISOString().split("T")[0];
   let added = 0;
@@ -194,6 +249,7 @@ export function mergeNewJobs(
       company: cleaned.company,
       id: generateId(),
       score: null,
+      score_reasoning: null,
       priority: isPriorityCompany(cleaned.company),
       date_found: today,
       date_applied: null,

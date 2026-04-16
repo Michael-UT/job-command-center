@@ -38,8 +38,36 @@ export interface ParsedJob {
   seniority: string | null;
   employment_type: string | null;
   status: string | null;
+  description: string | null;
   parse_failed: boolean;
   parse_fail_reason: string | null;
+}
+
+// Strip HTML → plaintext for description capture. Decodes common entities,
+// collapses whitespace, truncates to `limit` chars.
+function stripHtmlToText(html: string | null | undefined, limit = 2500): string | null {
+  if (!html) return null;
+  const text = String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+    .replace(/<header[\s\S]*?<\/header>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<\/?(br|p|div|li|h[1-6])[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#\d+;/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n\s*\n+/g, "\n\n")
+    .trim();
+  if (!text) return null;
+  return text.length > limit ? text.slice(0, limit).trim() + "..." : text;
 }
 
 // Extract useful content from HTML for parsing.
@@ -129,6 +157,7 @@ function tryJsonLd(html: string): ParsedJob | null {
         : data.employmentType === "PART_TIME" ? "part-time"
         : data.employmentType === "CONTRACTOR" ? "contract" : null,
       status: "open",
+      description: stripHtmlToText(data.description),
       parse_failed: false,
       parse_fail_reason: null,
     };
@@ -181,6 +210,7 @@ async function tryGreenhouseApi(url: string): Promise<ParsedJob | null> {
       seniority: null,
       employment_type: "full-time",
       status: "open",
+      description: stripHtmlToText(data.content),
       parse_failed: false,
       parse_fail_reason: null,
     };
@@ -226,6 +256,7 @@ function tryRipplingNextData(html: string, url: string): ParsedJob | null {
             seniority: null,
             employment_type: "full-time",
             status: "open",
+            description: stripHtmlToText(job.description) || stripHtmlToText(html),
             parse_failed: false,
             parse_fail_reason: null,
           };
@@ -245,6 +276,7 @@ function tryRipplingNextData(html: string, url: string): ParsedJob | null {
         seniority: null,
         employment_type: "full-time",
         status: "open",
+        description: stripHtmlToText(first.description) || stripHtmlToText(html),
         parse_failed: false,
         parse_fail_reason: null,
       };
@@ -287,6 +319,7 @@ function tryLeverMeta(html: string, url: string): ParsedJob | null {
       seniority: null,
       employment_type: "full-time",
       status: "open",
+      description: stripHtmlToText(html),
       parse_failed: false,
       parse_fail_reason: null,
     };
@@ -323,6 +356,7 @@ export async function parseSinglePage(page: RawPage): Promise<ParsedJob> {
 
   // Slow path: send to Claude API for extraction
   const cleaned = cleanHtml(page.html);
+  const description = stripHtmlToText(page.html);
 
   try {
     const anthropic = await getClient();
@@ -345,6 +379,7 @@ export async function parseSinglePage(page: RawPage): Promise<ParsedJob> {
       ats: page.ats,
       source: page.source,
       ...parsed,
+      description,
     };
   } catch (e) {
     return {
@@ -359,6 +394,7 @@ export async function parseSinglePage(page: RawPage): Promise<ParsedJob> {
       seniority: null,
       employment_type: null,
       status: null,
+      description,
       parse_failed: true,
       parse_fail_reason: `parse_error: ${e instanceof Error ? e.message : String(e)}`,
     };
@@ -424,13 +460,14 @@ export async function batchParsePages(pages: RawPage[]): Promise<ParsedJob[]> {
       const idx = parseInt(entry.custom_id.replace("job-", ""), 10);
       const page = pages[idx];
 
+      const description = stripHtmlToText(page.html);
       if (entry.result.type === "succeeded") {
         try {
           const msg = entry.result.message;
           const text =
             msg.content[0].type === "text" ? msg.content[0].text : "";
           const data = JSON.parse(text);
-          parsed.push({ url: page.url, ats: page.ats, source: page.source, ...data });
+          parsed.push({ url: page.url, ats: page.ats, source: page.source, ...data, description });
         } catch {
           parsed.push({
             url: page.url,
@@ -444,6 +481,7 @@ export async function batchParsePages(pages: RawPage[]): Promise<ParsedJob[]> {
             seniority: null,
             employment_type: null,
             status: null,
+            description,
             parse_failed: true,
             parse_fail_reason: "batch_result_parse_error",
           });
@@ -461,6 +499,7 @@ export async function batchParsePages(pages: RawPage[]): Promise<ParsedJob[]> {
           seniority: null,
           employment_type: null,
           status: null,
+          description,
           parse_failed: true,
           parse_fail_reason: `batch_error: ${entry.result.type}`,
         });

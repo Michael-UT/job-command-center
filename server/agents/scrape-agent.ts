@@ -8,14 +8,16 @@
 import { config } from "dotenv";
 config();
 
+import { fileURLToPath } from "url";
 import { generateQueryMatrix, detectATS } from "../config/scrape-config.js";
 import { parseSinglePage } from "../scraper/batch-parser.js";
 import { loadJobs, saveJobs, mergeNewJobs, isDuplicate } from "../scraper/dedup.js";
 
 const QUICK_MODE = process.argv.includes("--quick");
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
+const IS_MAIN = process.argv[1] === fileURLToPath(import.meta.url);
 
-if (!SERPER_API_KEY) {
+if (IS_MAIN && !SERPER_API_KEY) {
   console.error("Missing SERPER_API_KEY in .env — get a free key at https://serper.dev");
   process.exit(1);
 }
@@ -64,7 +66,7 @@ const JUNK_TITLE_PATTERNS = [
 
 // Non-US location indicators (for filtering during parse)
 const NON_US_PATTERNS = [
-  /\b(India|Bangalore|Bengaluru|Chennai|Mumbai|Pune|Gurugram|Noida|Delhi)\b/i,
+  /\b(India|Bangalore|Bengaluru|Chennai|Mumbai|Pune|Gurugram|Noida|Delhi|Hyderabad|Kolkata)\b/i,
   /\b(London|England|UK|United Kingdom|Dublin|Ireland)\b/i,
   /\b(Paris|France|Germany|Munich|Berlin|Hamburg)\b/i,
   /\b(Barcelona|Spain|Madrid|Italy|Milan)\b/i,
@@ -78,17 +80,32 @@ const NON_US_PATTERNS = [
   /\b(Turkey|Istanbul)\b/i,
 ];
 
-const US_PATTERNS = /\b(US|USA|United States|Remote|New York|San Francisco|Boston|Austin|Seattle|Chicago|Washington|California|NYC|SF|Denver|Atlanta|Dallas|Reno|Pittsburgh|Charlotte|Los Angeles|Portland|Phoenix|Durham|Brooklyn)\b/i;
+// ISO 3166-1 alpha-3 country-code prefixes seen in ATS location strings
+// (e.g. Rackspace format: "IND-Work from Home-Remote"). Start-anchored with a
+// delimiter so we don't match common English words.
+const NON_US_ISO3_PREFIX = /^(IND|SGP|JPN|GBR|CHN|TWN|DEU|FRA|BRA|MEX|ARE|THA|PHL|VNM|PAK|IDN|MYS|KOR|NLD|ISR|AUS|IRL|DNK|HUN|POL|TUR|GRC|HRV|PRT|NOR|SWE|FIN|CHE|AUT|BEL|CZE|ZAF|EGY|NGA|KEN|NZL|RUS|MAR|COL|CHL|PER|ARG)[-\s,]/i;
+
+// Non-US ISO alpha-2 codes at the end of a title (e.g., "Engineer II - IN").
+// Excludes ambiguous codes that collide with US-state abbreviations (IN=Indiana,
+// IL=Illinois, ID=Idaho, CO=Colorado, CA=California, DE=Delaware, MA=Mass.,
+// AL=Alabama) — those are handled only when location confirms non-US.
+const NON_US_TITLE_CODE_UNAMBIGUOUS = /[-–—]\s*(JP|SG|KR|NL|HK|TW|AE|TH|VN|PH|PK|MX|BR|CL|EG|ZA|NG|KE|NZ|TR|GR|HU|RO|BG|RS|UA)\b\s*$/;
+
+const US_PATTERNS = /\b(US|USA|United States|Remote|New York|San Francisco|Boston|Austin|Seattle|Chicago|Washington|California|NYC|SF|Denver|Atlanta|Dallas|Reno|Pittsburgh|Charlotte|Los Angeles|Portland|Phoenix|Durham|Brooklyn|Indianapolis|Minneapolis|Nashville|Raleigh|Columbus|Cincinnati|Kansas City|Salt Lake|Philadelphia|Miami|Houston|Detroit|Baltimore|St\.? Louis|San Diego|Sacramento|Tampa|Orlando|Jacksonville|Virginia|Texas|Ohio|Illinois|Massachusetts|Maryland|Connecticut|Colorado|Arizona|Oregon|Utah|Michigan|Minnesota|Wisconsin|Indiana|Kentucky|Tennessee|Alabama|Georgia|Florida|Pennsylvania|New Jersey|Nevada)\b/i;
 
 export function isNonUS(location: string | null, title: string | null): boolean {
   if (location) {
     const hasUS = US_PATTERNS.test(location);
+    if (NON_US_ISO3_PREFIX.test(location)) return true; // "IND-…" always wins
     const hasNonUS = NON_US_PATTERNS.some((p) => p.test(location));
     if (hasNonUS && !hasUS) return true;
   }
   if (title) {
-    if (/\bEMEA\b|\bAPAC\b|\bLATAM\b/i.test(title)) return true;
+    if (/\bEMEA\b|\bAPAC\b|\bLATAM\b|\bANZ\b|\bMENA\b|\bSEA\b/i.test(title)) return true;
     if (/- (Paris|London|UK|India|Germany|Morocco|MENA)\b/i.test(title)) return true;
+    if (NON_US_TITLE_CODE_UNAMBIGUOUS.test(title)) return true;
+    // "IN" is ambiguous (India vs Indiana); only flag if location lacks a US signal
+    if (/[-–—]\s*IN\s*$/i.test(title) && !(location && US_PATTERNS.test(location))) return true;
   }
   return false;
 }
@@ -223,7 +240,8 @@ async function main() {
       // Add with search snippet info
       mergeNewJobs(jobsData, [{
         url, title: result.title || null, company: null, ats: detectATS(url),
-        location: null, salary: null, seniority: null, source: "serper", scrape_detail_failed: true,
+        location: null, salary: null, seniority: null, source: "serper",
+        scrape_detail_failed: true, description: null, priority: false,
       }]);
       console.log(`⚠ Fetch failed — ${result.title?.slice(0, 50)}`);
       continue;
@@ -240,7 +258,8 @@ async function main() {
           mergeNewJobs(jobsData, [{
             url, title: parsed.title || result.title || null, company: parsed.company,
             ats: parsed.ats, location: parsed.location, salary: parsed.salary,
-            seniority: parsed.seniority, source: parsed.source, scrape_detail_failed: false,
+            seniority: parsed.seniority, source: parsed.source,
+            scrape_detail_failed: false, description: parsed.description, priority: false,
           }]);
           parseSuccess++;
           console.log(`✓ ${(parsed.title || "?").slice(0, 40)} @ ${parsed.company || "?"} | ${parsed.salary || "-"}`);
@@ -252,7 +271,8 @@ async function main() {
       } else if (parsed.parse_failed) {
         mergeNewJobs(jobsData, [{
           url, title: result.title || null, company: null, ats: detectATS(url),
-          location: null, salary: null, seniority: null, source: "serper", scrape_detail_failed: true,
+          location: null, salary: null, seniority: null, source: "serper",
+          scrape_detail_failed: true, description: parsed.description, priority: false,
         }]);
         console.log(`⚠ Parse failed — ${parsed.parse_fail_reason?.slice(0, 40)}`);
       }
@@ -268,7 +288,11 @@ async function main() {
   const { fetchAllPriorityJobs } = await import("../scraper/priority-fetcher.js");
   const priorityJobs = await fetchAllPriorityJobs();
   if (priorityJobs.length > 0) {
-    const toMerge = priorityJobs.map((j) => ({
+    const usPriorityJobs = priorityJobs.filter((j) => !isNonUS(j.location, j.title));
+    const droppedNonUS = priorityJobs.length - usPriorityJobs.length;
+    if (droppedNonUS > 0) console.log(`  Filtered ${droppedNonUS} non-US priority jobs`);
+
+    const toMerge = usPriorityJobs.map((j) => ({
       url: j.url,
       title: j.title,
       company: j.company,
@@ -278,6 +302,8 @@ async function main() {
       seniority: null,
       source: j.source,
       scrape_detail_failed: false,
+      description: j.description,
+      priority: true,
     }));
     const before = jobsData.jobs.length;
     mergeNewJobs(jobsData, toMerge);
@@ -319,4 +345,4 @@ async function main() {
   console.log(`  Cost: $0.00 (Serper free tier + JSON-LD parsing)`);
 }
 
-main().catch(console.error);
+if (IS_MAIN) main().catch(console.error);
