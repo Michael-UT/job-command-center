@@ -9,25 +9,24 @@ const TITLE_BATCH_SIZE = 3;
 export interface SiteTarget {
   name: string;
   siteOperator: string;
-  scrapable: boolean; // whether direct WebFetch works, or only Google index
 }
 
 export const ATS_SITES: SiteTarget[] = [
-  { name: "Ashby", siteOperator: "site:jobs.ashbyhq.com", scrapable: true },
-  { name: "Greenhouse", siteOperator: "site:job-boards.greenhouse.io", scrapable: true },
-  { name: "Greenhouse (alt)", siteOperator: "site:boards.greenhouse.io", scrapable: true },
-  { name: "Lever", siteOperator: "site:jobs.lever.co", scrapable: true },
-  { name: "Workday", siteOperator: "site:myworkdayjobs.com", scrapable: false },
-  { name: "Rippling", siteOperator: "site:ats.rippling.com", scrapable: true },
+  { name: "Ashby", siteOperator: "site:jobs.ashbyhq.com" },
+  { name: "Greenhouse", siteOperator: "site:job-boards.greenhouse.io" },
+  { name: "Greenhouse (alt)", siteOperator: "site:boards.greenhouse.io" },
+  { name: "Lever", siteOperator: "site:jobs.lever.co" },
+  { name: "Workday", siteOperator: "site:myworkdayjobs.com" },
+  { name: "Rippling", siteOperator: "site:ats.rippling.com" },
 ];
 
 export const JOB_BOARD_SITES: SiteTarget[] = [
-  { name: "LinkedIn", siteOperator: "site:linkedin.com/jobs", scrapable: false },
-  { name: "Wellfound", siteOperator: "site:wellfound.com/jobs", scrapable: false },
-  { name: "Built In", siteOperator: "site:builtin.com/job", scrapable: true },
-  { name: "YC", siteOperator: "site:workatastartup.com", scrapable: true },
-  { name: "startup.jobs", siteOperator: "site:startup.jobs", scrapable: true },
-  { name: "ai-jobs.net", siteOperator: "site:ai-jobs.net", scrapable: true },
+  { name: "LinkedIn", siteOperator: "site:linkedin.com/jobs" },
+  { name: "Wellfound", siteOperator: "site:wellfound.com/jobs" },
+  { name: "Built In", siteOperator: "site:builtin.com/job" },
+  { name: "YC", siteOperator: "site:workatastartup.com" },
+  { name: "startup.jobs", siteOperator: "site:startup.jobs" },
+  { name: "ai-jobs.net", siteOperator: "site:ai-jobs.net" },
 ];
 
 export const ALL_SITES: SiteTarget[] = [...ATS_SITES, ...JOB_BOARD_SITES];

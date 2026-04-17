@@ -85,18 +85,29 @@ function sortArchivedJobs<
   });
 }
 
+function loadBoardState() {
+  const data = loadJobs();
+  const archivedData = loadArchivedJobs();
+  const searchProfile = loadSearchProfile();
+
+  const grouped = getJobsByStatus({
+    ...data,
+    jobs: data.jobs.map((job) => enrichJobMatches(job, searchProfile)),
+  });
+
+  return {
+    data,
+    archivedData,
+    grouped,
+    searchProfile,
+  };
+}
+
 // GET /api/jobs — return all jobs grouped by status
 app.get("/api/jobs", (_req, res) => {
   try {
-    const data = loadJobs();
-    const archivedData = loadArchivedJobs();
-    const searchProfile = loadSearchProfile();
-    const enrichedData = {
-      ...data,
-      jobs: data.jobs.map((job) => enrichJobMatches(job, searchProfile)),
-    };
+    const { data, archivedData, grouped, searchProfile } = loadBoardState();
     const enrichedArchivedJobs = archivedData.jobs.map((job) => enrichJobMatches(job, searchProfile));
-    const grouped = getJobsByStatus(enrichedData);
     res.json({
       newToday: sortJobsByMatch(grouped.newToday),
       previouslySeen: sortJobsByMatch(grouped.previouslySeen),
@@ -118,13 +129,7 @@ app.get("/api/jobs", (_req, res) => {
 // GET /api/status — dashboard stats
 app.get("/api/status", (_req, res) => {
   try {
-    const data = loadJobs();
-    const archivedData = loadArchivedJobs();
-    const searchProfile = loadSearchProfile();
-    const grouped = getJobsByStatus({
-      ...data,
-      jobs: data.jobs.map((job) => enrichJobMatches(job, searchProfile)),
-    });
+    const { data, archivedData, grouped, searchProfile } = loadBoardState();
     const queryStats = getQueryStats(searchProfile);
     res.json({
       total_jobs: data.jobs.length,

@@ -13,6 +13,10 @@ import { loadSearchProfile } from "../config/search-profile.js";
 import { extractJobMatchContext } from "../matching/context.js";
 import { parseSinglePage } from "../scraper/batch-parser.js";
 import { loadArchivedJobs, loadJobs, saveJobs, mergeNewJobs, isDuplicate } from "../scraper/dedup.js";
+import {
+  cleanSearchResultTitle,
+  inferCompanyFromSearchResult,
+} from "../scraper/job-normalization.js";
 
 const QUICK_MODE = process.argv.includes("--quick");
 const SERPER_API_KEY = process.env.SERPER_API_KEY;
@@ -100,65 +104,6 @@ function isJunk(url: string, title: string): boolean {
   if (JUNK_URL_PATTERNS.some((p) => p.test(url))) return true;
   if (title && JUNK_TITLE_PATTERNS.some((p) => p.test(title))) return true;
   return false;
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function looksLikeCompanyName(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 48) return false;
-  if (/[()]/.test(trimmed)) return false;
-  if (/\d/.test(trimmed)) return false;
-  if (trimmed.split(/\s+/).length > 4) return false;
-  if (/\b(careers?|jobs?|remote|hybrid|onsite|on-site|new grad|intern|contract)\b/i.test(trimmed)) {
-    return false;
-  }
-  return /^[A-Z][A-Za-z&.+,' -]*$/.test(trimmed);
-}
-
-function inferCompanyFromSearchResult(title: string | null, snippet: string | null): string | null {
-  const normalizedTitle = (title || "").trim();
-  const normalizedSnippet = (snippet || "").trim();
-
-  const titleSegments = normalizedTitle
-    .split(/\s(?:-|–|—|\|)\s/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  const titleCandidate = titleSegments.length > 1 ? titleSegments[titleSegments.length - 1] : null;
-  if (titleCandidate && looksLikeCompanyName(titleCandidate)) {
-    return titleCandidate;
-  }
-
-  const hiringMatch = normalizedSnippet.match(/^([^.,|:]+?)\s+is hiring\b/i)?.[1]?.trim();
-  if (hiringMatch && looksLikeCompanyName(hiringMatch)) {
-    return hiringMatch;
-  }
-
-  const applyAtMatch = normalizedSnippet.match(/\bjob at\s+([^.,|:]+?)(?:[.·|]|$)/i)?.[1]?.trim();
-  if (applyAtMatch && looksLikeCompanyName(applyAtMatch)) {
-    return applyAtMatch;
-  }
-
-  return null;
-}
-
-function cleanSearchResultTitle(title: string | null, company: string | null): string | null {
-  if (!title) return null;
-
-  let cleaned = title.trim().replace(/\s+/g, " ");
-  if (company) {
-    const companyPattern = escapeRegex(company).replace(/\s+/g, "\\s+");
-    cleaned = cleaned.replace(new RegExp(`\\s(?:-|–|—|\\|)\\s${companyPattern}$`, "i"), "").trim();
-  }
-
-  cleaned = cleaned
-    .replace(/\s+\|\s+(Wellfound|Built In|LinkedIn|Y Combinator.*)$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return cleaned || null;
 }
 
 function buildSnippetQualifications(snippet: string): string | null {

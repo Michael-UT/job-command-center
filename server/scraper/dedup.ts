@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { randomBytes } from "crypto";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { inferCompanyFromTitle, stripCompanyFromTitle } from "./job-normalization.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -55,10 +56,6 @@ function defaultJobsData(): JobsData {
 
 function defaultArchivedJobsData(): ArchivedJobsData {
   return { jobs: [] };
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getLocalDateStamp(date = new Date()): string {
@@ -153,45 +150,6 @@ function normalizeCompany(company: string | null | undefined): string | null {
   return normalized || null;
 }
 
-function looksLikeCompanyName(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 48) return false;
-  if (/[()]/.test(trimmed)) return false;
-  if (/\d/.test(trimmed)) return false;
-  if (trimmed.split(/\s+/).length > 4) return false;
-  if (/\b(careers?|jobs?|remote|hybrid|onsite|on-site|new grad|intern|contract)\b/i.test(trimmed)) {
-    return false;
-  }
-  return /^[A-Z][A-Za-z&.+,' -]*$/.test(trimmed);
-}
-
-function inferCompanyFromTitle(title: string | null | undefined): string | null {
-  if (!title) return null;
-
-  const segments = title
-    .split(/\s(?:-|–|—|\|)\s/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-
-  if (segments.length < 2) return null;
-  const candidate = segments[segments.length - 1];
-  return looksLikeCompanyName(candidate) ? candidate : null;
-}
-
-function stripCompanyFromTitle(title: string, company: string | null | undefined): string {
-  if (!title) return "";
-
-  const effectiveCompany = company || inferCompanyFromTitle(title);
-  if (!effectiveCompany) return title.trim();
-
-  const companyPattern = escapeRegex(effectiveCompany).replace(/\s+/g, "\\s+");
-  return title
-    .replace(new RegExp(`\\s(?:-|–|—|\\|)\\s${companyPattern}$`, "i"), "")
-    .replace(new RegExp(`\\s+at\\s+${companyPattern}(?=\\s|$)`, "i"), " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function normalizeTitleForDedup(title: string | null, company: string | null | undefined): string | null {
   if (!title) return null;
 
@@ -275,8 +233,7 @@ function findCrossSiteDuplicateJob<T extends JobIdentity>(
 
 function titleHasCompanySuffix(title: string | null, company: string | null): boolean {
   if (!title || !company) return false;
-  const companyPattern = escapeRegex(company).replace(/\s+/g, "\\s+");
-  return new RegExp(`\\s(?:-|–|—|\\|)\\s${companyPattern}$`, "i").test(title);
+  return stripCompanyFromTitle(title, company) !== title.trim();
 }
 
 function shouldPreferIncomingTitle(
@@ -300,6 +257,34 @@ function shouldPreferIncomingText(currentValue: string | null | undefined, incom
   if (!incomingValue) return false;
   if (!currentValue) return true;
   return incomingValue.length > currentValue.length + 40;
+}
+
+function getAtsSpecificityRank(ats: string): number {
+  if (!ats || ats === "unknown") return 0;
+  if (ats === "company_site") return 1;
+  return 2;
+}
+
+function shouldPreferIncomingAts(currentAts: string, incomingAts: string): boolean {
+  return getAtsSpecificityRank(incomingAts) > getAtsSpecificityRank(currentAts);
+}
+
+function shouldPreferIncomingSource(
+  currentSource: string,
+  incomingSource: string,
+  currentDetailFailed: boolean,
+  incomingDetailFailed: boolean,
+): boolean {
+  if (!incomingSource) return false;
+  if (!currentSource) return true;
+
+  if (currentDetailFailed && !incomingDetailFailed) {
+    return true;
+  }
+
+  const currentIsFallback = currentSource === "serper";
+  const incomingIsFallback = incomingSource === "serper";
+  return currentIsFallback && !incomingIsFallback;
 }
 
 function getStatusRank(status: Job["status"]): number {
@@ -329,6 +314,23 @@ function mergeJobData(
 
   if (shouldPreferIncomingTitle(target.title, incoming.title, resolvedCompany)) {
     target.title = incoming.title;
+    changed = true;
+  }
+
+  if (shouldPreferIncomingAts(target.ats, incoming.ats)) {
+    target.ats = incoming.ats;
+    changed = true;
+  }
+
+  if (
+    shouldPreferIncomingSource(
+      target.source,
+      incoming.source,
+      target.scrape_detail_failed,
+      incoming.scrape_detail_failed,
+    )
+  ) {
+    target.source = incoming.source;
     changed = true;
   }
 

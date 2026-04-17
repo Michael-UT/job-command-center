@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
 const API_BASE = "/api";
 
@@ -9,7 +9,7 @@ const ATS_COLORS = {
   workday: "#f59e0b",
   linkedin: "#0a66c2",
   indeed: "#2164f3",
-  wellfound: "#000",
+  wellfound: "#f472b6",
   yc: "#f26522",
   builtin: "#14b8a6",
   startup_jobs: "#f97316",
@@ -19,6 +19,9 @@ const ATS_COLORS = {
 };
 
 const EMPTY_PROFILE = { titles: [], negativeTitleKeywords: [], qualificationKeywords: [] };
+const SCRAPE_REFRESH_WINDOW_MS = 300000;
+const POST_ACTION_REFRESH_DELAY_MS = 2000;
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function sanitizeItem(value) {
   return value.trim().replace(/\s+/g, " ");
@@ -87,6 +90,49 @@ function getMatchColor(score) {
   if (score >= 6) return "#3b82f6";
   if (score >= 4) return "#f59e0b";
   return "#555";
+}
+
+function filterJobs(jobs, search, filterATS, minMatch) {
+  let filtered = jobs;
+
+  if (search) {
+    const lowerSearch = search.toLowerCase();
+    filtered = filtered.filter((job) =>
+      (job.title || "").toLowerCase().includes(lowerSearch)
+      || (job.company || "").toLowerCase().includes(lowerSearch)
+      || (job.location || "").toLowerCase().includes(lowerSearch),
+    );
+  }
+
+  if (filterATS !== "all") {
+    filtered = filtered.filter((job) => job.ats === filterATS);
+  }
+
+  if (minMatch !== "all") {
+    const threshold = Number.parseInt(minMatch, 10);
+    filtered = filtered.filter((job) => (job.match_score ?? -1) >= threshold);
+  }
+
+  return filtered;
+}
+
+function formatDate(value) {
+  if (!value) return "Never";
+
+  // jobs.json stores `date_found` as YYYY-MM-DD without a timezone. Parse those
+  // as local calendar dates so the table does not drift backward by timezone.
+  if (DATE_ONLY_PATTERN.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    return new Date(year, month - 1, day).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    });
+  }
+
+  const date = new Date(value);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+    + " "
+    + date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
 function ChipEditor({
@@ -212,6 +258,15 @@ export default function JobCommandCenter() {
   const [batchLimit, setBatchLimit] = useState("10");
   const [statusMsg, setStatusMsg] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
+  const scrapeResetTimerRef = useRef(null);
+  const postActionRefreshTimerRef = useRef(null);
+
+  const syncSearchProfileState = useCallback((result) => {
+    setSearchProfile(normalizeProfile(result.profile));
+    setSavedSearchProfile(normalizeProfile(result.profile));
+    setDefaultProfile(normalizeProfile(result.defaults));
+    setProfileStats(result.query_matrix);
+  }, []);
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -227,14 +282,11 @@ export default function JobCommandCenter() {
       const res = await fetch(`${API_BASE}/search-profile`);
       if (!res.ok) return;
       const result = await res.json();
-      setSearchProfile(normalizeProfile(result.profile));
-      setSavedSearchProfile(normalizeProfile(result.profile));
-      setDefaultProfile(normalizeProfile(result.defaults));
-      setProfileStats(result.query_matrix);
+      syncSearchProfileState(result);
     } catch {
       // server not running
     }
-  }, []);
+  }, [syncSearchProfileState]);
 
   useEffect(() => {
     fetchJobs();
@@ -247,12 +299,25 @@ export default function JobCommandCenter() {
     return () => clearInterval(interval);
   }, [scraping, fetchJobs]);
 
+  useEffect(() => () => {
+    if (scrapeResetTimerRef.current) {
+      window.clearTimeout(scrapeResetTimerRef.current);
+    }
+    if (postActionRefreshTimerRef.current) {
+      window.clearTimeout(postActionRefreshTimerRef.current);
+    }
+  }, []);
+
   const profileDirty = useMemo(
     () => !profileEquals(searchProfile, savedSearchProfile),
     [savedSearchProfile, searchProfile],
   );
 
   const handleScrape = async (quick = false) => {
+    if (scrapeResetTimerRef.current) {
+      window.clearTimeout(scrapeResetTimerRef.current);
+    }
+
     setScraping(true);
     setStatusMsg("Scraping with the current search profile. Check terminal for progress.");
     try {
@@ -262,32 +327,48 @@ export default function JobCommandCenter() {
         body: JSON.stringify({ quick }),
       });
       const result = await res.json();
-      if (!res.ok) setStatusMsg(result.error || "Scrape failed");
-      else setStatusMsg(`Scrape started (${result.mode} mode). Refresh in a few minutes.`);
+      if (!res.ok) {
+        setScraping(false);
+        setStatusMsg(result.error || "Scrape failed");
+        return;
+      }
+
+      setStatusMsg(`Scrape started (${result.mode} mode). Refresh in a few minutes.`);
+      scrapeResetTimerRef.current = window.setTimeout(() => {
+        setScraping(false);
+        fetchJobs();
+      }, SCRAPE_REFRESH_WINDOW_MS);
     } catch {
+      setScraping(false);
       setStatusMsg("Failed to start scrape. Is the server running?");
     }
-    setTimeout(() => {
-      setScraping(false);
-      fetchJobs();
-    }, 300000);
   };
 
   const handleApply = async (jobId) => {
+    let started = false;
     setApplying(jobId);
     setStatusMsg("Apply agent started. It should open a browser, fill what it can, then leave the rest for you.");
     try {
       const res = await fetch(`${API_BASE}/apply/${jobId}`, { method: "POST" });
       const result = await res.json();
-      if (!res.ok) setStatusMsg(result.error || "Failed to start apply agent.");
-      else setStatusMsg(result.message || "Apply started");
+      if (!res.ok) {
+        setStatusMsg(result.error || "Failed to start apply agent.");
+        return;
+      }
+
+      started = true;
+      setStatusMsg(result.message || "Apply started");
     } catch {
       setStatusMsg("Failed to start apply agent.");
-    }
-    setTimeout(() => {
+    } finally {
       setApplying(null);
-      fetchJobs();
-    }, 5000);
+      if (started) {
+        if (postActionRefreshTimerRef.current) {
+          window.clearTimeout(postActionRefreshTimerRef.current);
+        }
+        postActionRefreshTimerRef.current = window.setTimeout(fetchJobs, POST_ACTION_REFRESH_DELAY_MS);
+      }
+    }
   };
 
   const handleApplyAllNew = async () => {
@@ -373,10 +454,7 @@ export default function JobCommandCenter() {
         return;
       }
 
-      setSearchProfile(normalizeProfile(result.profile));
-      setSavedSearchProfile(normalizeProfile(result.profile));
-      setDefaultProfile(normalizeProfile(result.defaults));
-      setProfileStats(result.query_matrix);
+      syncSearchProfileState(result);
       setStatusMsg("Search profile saved. The next scrape will use the updated titles, exclusions, and keywords.");
       fetchJobs();
     } catch {
@@ -386,47 +464,20 @@ export default function JobCommandCenter() {
     }
   };
 
-  const filterJobs = (jobs) => {
-    let filtered = jobs;
-
-    if (search) {
-      const lowerSearch = search.toLowerCase();
-      filtered = filtered.filter((job) =>
-        (job.title || "").toLowerCase().includes(lowerSearch)
-        || (job.company || "").toLowerCase().includes(lowerSearch)
-        || (job.location || "").toLowerCase().includes(lowerSearch),
-      );
-    }
-
-    if (filterATS !== "all") {
-      filtered = filtered.filter((job) => job.ats === filterATS);
-    }
-
-    if (minMatch !== "all") {
-      const threshold = Number.parseInt(minMatch, 10);
-      filtered = filtered.filter((job) => (job.match_score ?? -1) >= threshold);
-    }
-
-    return filtered;
-  };
-
   const allATS = useMemo(() => {
     const all = [...data.newToday, ...data.previouslySeen, ...data.applied, ...(data.archived || [])];
     return [...new Set(all.map((job) => job.ats))].sort();
   }, [data]);
 
-  const filteredArchivedJobs = useMemo(
-    () => filterJobs(data.archived || []),
-    [data.archived, filterATS, minMatch, search],
+  const filteredJobsByStatus = useMemo(
+    () => ({
+      newToday: filterJobs(data.newToday || [], search, filterATS, minMatch),
+      previouslySeen: filterJobs(data.previouslySeen || [], search, filterATS, minMatch),
+      applied: filterJobs(data.applied || [], search, filterATS, minMatch),
+      archived: filterJobs(data.archived || [], search, filterATS, minMatch),
+    }),
+    [data.newToday, data.previouslySeen, data.applied, data.archived, search, filterATS, minMatch],
   );
-
-  const formatDate = (iso) => {
-    if (!iso) return "Never";
-    const date = new Date(iso);
-    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
-      + " "
-      + date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  };
 
   const subtitle = useMemo(() => {
     if (searchProfile.titles.length === 0 && searchProfile.negativeTitleKeywords.length === 0) {
@@ -506,7 +557,7 @@ export default function JobCommandCenter() {
             {job.ats}
           </span>
         </td>
-        <td style={{ padding: "10px 8px", fontSize: 10, color: "#555" }}>{job.date_found}</td>
+        <td style={{ padding: "10px 8px", fontSize: 10, color: "#555" }}>{formatDate(job.date_found)}</td>
         <td style={{ padding: "10px 8px" }}>
           {mode === "archived" ? (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -921,29 +972,29 @@ export default function JobCommandCenter() {
           </button>
         </div>
 
-        {filterJobs(data.newToday || []).length > 0 && (
+        {filteredJobsByStatus.newToday.length > 0 && (
           <>
-            <SectionHeader title="New Today" count={filterJobs(data.newToday).length} color="#10b981" />
+            <SectionHeader title="New Today" count={filteredJobsByStatus.newToday.length} color="#10b981" />
             <div style={{ background: "#0d0d15", border: "1px solid #1a2a1a", borderRadius: 8, overflow: "hidden" }}>
-              <JobTable jobs={filterJobs(data.newToday)} mode="active" />
+              <JobTable jobs={filteredJobsByStatus.newToday} mode="active" />
             </div>
           </>
         )}
 
-        {filterJobs(data.previouslySeen || []).length > 0 && (
+        {filteredJobsByStatus.previouslySeen.length > 0 && (
           <>
-            <SectionHeader title="Previously Seen" count={filterJobs(data.previouslySeen).length} color="#f59e0b" />
+            <SectionHeader title="Previously Seen" count={filteredJobsByStatus.previouslySeen.length} color="#f59e0b" />
             <div style={{ background: "#0d0d15", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
-              <JobTable jobs={filterJobs(data.previouslySeen)} mode="active" />
+              <JobTable jobs={filteredJobsByStatus.previouslySeen} mode="active" />
             </div>
           </>
         )}
 
-        {filterJobs(data.applied || []).length > 0 && (
+        {filteredJobsByStatus.applied.length > 0 && (
           <>
-            <SectionHeader title="Applied" count={filterJobs(data.applied).length} color="#3b82f6" />
+            <SectionHeader title="Applied" count={filteredJobsByStatus.applied.length} color="#3b82f6" />
             <div style={{ background: "#0a0a10", border: "1px solid #1a1a22", borderRadius: 8, overflow: "hidden" }}>
-              <JobTable jobs={filterJobs(data.applied)} mode="applied" />
+              <JobTable jobs={filteredJobsByStatus.applied} mode="applied" />
             </div>
           </>
         )}
@@ -975,7 +1026,7 @@ export default function JobCommandCenter() {
             >
               <div>
                 <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", color: "#fcd34d" }}>
-                  Archived Jobs ({filteredArchivedJobs.length})
+                  Archived Jobs ({filteredJobsByStatus.archived.length})
                 </div>
                 <div style={{ fontSize: 10, color: "#7c7c86", marginTop: 4 }}>
                   Stored separately from the active board so future scrapes stay clean.
@@ -987,9 +1038,9 @@ export default function JobCommandCenter() {
             </button>
 
             {showArchived && (
-              filteredArchivedJobs.length > 0 ? (
+              filteredJobsByStatus.archived.length > 0 ? (
                 <div style={{ background: "#0a0a10", border: "1px solid #2a2415", borderRadius: 8, overflow: "hidden", marginTop: 10 }}>
-                  <JobTable jobs={filteredArchivedJobs} mode="archived" />
+                  <JobTable jobs={filteredJobsByStatus.archived} mode="archived" />
                 </div>
               ) : (
                 <div style={{ background: "#0a0a10", border: "1px solid #2a2415", borderRadius: 8, padding: "16px 18px", marginTop: 10, fontSize: 11, color: "#7c7c86" }}>

@@ -124,6 +124,7 @@ export function scoreJobAgainstProfile(
   profile: SearchProfile,
 ): MatchResult {
   const jobTitle = candidate.title || "";
+  const normalizedJobTitle = normalize(jobTitle);
   const combinedText = [
     candidate.descriptionText,
     candidate.qualificationText,
@@ -146,8 +147,10 @@ export function scoreJobAgainstProfile(
     `${jobTitle}\n${combinedText}`,
     profile.qualificationKeywords,
   );
+  // Negative title filters are meant to suppress bad-fit role names, so only
+  // score them against the title itself instead of penalizing description text.
   const matchedNegativeTitleKeywords = collectMatchedKeywords(
-    `${jobTitle}\n${combinedText}`,
+    jobTitle,
     profile.negativeTitleKeywords,
   );
 
@@ -165,7 +168,7 @@ export function scoreJobAgainstProfile(
     bestRoleTitle && hasSpecializedTitleVariant(jobTitle, bestRoleTitle) ? 1 : 0;
 
   const hasNonTargetSignal = NON_TARGET_TITLE_KEYWORDS.some((keyword) =>
-    normalize(jobTitle).includes(keyword),
+    normalizedJobTitle.includes(keyword),
   );
   const penalty = hasNonTargetSignal && bestTitleScore < 4 ? 2 : 0;
   const exclusionPenalty = Math.min(4, matchedNegativeTitleKeywords.length * 4);
